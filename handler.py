@@ -882,6 +882,80 @@ class ADBHandler:
             self.logger.error(f"Error checking path existence: {e}")
             return False
 
+    def paths_exist(self, paths: List[str]) -> Dict[str, bool]:
+        """Test many remote paths in one shell call instead of one call each."""
+        if not paths:
+            return {}
+        wanted = list(dict.fromkeys(paths))
+        try:
+            quoted = ' '.join(shell_quote(p) for p in wanted)
+            command = f'for p in {quoted}; do if [ -e "$p" ]; then echo y; else echo n; fi; done'
+            result = self._shell(command, timeout=60)
+            answers = [l.strip() for l in (result.stdout or "").splitlines() if l.strip()]
+            if len(answers) != len(wanted):
+                self.logger.warning("Unexpected existence-test output; falling back to per-path checks")
+                return {p: self.path_exists(p) for p in wanted}
+            return dict(zip(wanted, [a == 'y' for a in answers]))
+        except Exception as e:
+            self.logger.error(f"Error checking paths: {e}")
+            return {p: False for p in wanted}
+
+    def push_items(self, local_paths: List[str], remote_dir: str, line_callback=None,
+                   sync: bool = False) -> bool:
+        """Push files and whole folders in a single adb push.
+
+        adb pushes directories recursively and accepts several sources at once,
+        which is far faster than one invocation per file. `sync=True` skips
+        files that are already identical on the device.
+        """
+        if not local_paths:
+            return True
+        if not self.create_folder(remote_dir):
+            return False
+        command = ['push']
+        if sync:
+            command.append('--sync')
+        command += [*local_paths, remote_dir.rstrip('/') + '/']
+        return self._run_transfer_streaming(command, line_callback=line_callback)
+
+    def pull_items(self, remote_paths: List[str], local_dir: str, line_callback=None) -> bool:
+        """Pull files and whole folders in a single adb pull."""
+        if not remote_paths:
+            return True
+        os.makedirs(local_dir, exist_ok=True)
+        return self._run_transfer_streaming(
+            ['pull', *remote_paths, local_dir],
+            line_callback=line_callback,
+        )
+
+    def disk_usage_many(self, paths: List[str]) -> int:
+        """Total size of several remote paths, measured in one shell call."""
+        if not paths:
+            return 0
+        try:
+            quoted = ' '.join(shell_quote(p) for p in paths)
+            result = self._shell(f'du -sk {quoted}', timeout=120)
+            total = 0
+            for line in (result.stdout or "").splitlines():
+                first = line.split()
+                if first and first[0].isdigit():
+                    total += int(first[0]) * 1024
+            return total
+        except Exception as e:
+            self.logger.debug(f"du failed for {paths}: {e}")
+            return 0
+
+    def disk_usage(self, path: str) -> Optional[int]:
+        """Total size of a remote file or folder in bytes, or None if unknown."""
+        try:
+            result = self._shell(f'du -sk {shell_quote(path)}', timeout=120)
+            first = (result.stdout or "").strip().split()
+            if first and first[0].isdigit():
+                return int(first[0]) * 1024
+        except Exception as e:
+            self.logger.debug(f"du failed for {path}: {e}")
+        return None
+
     def install_apk(self, apk_path: str) -> bool:
         if not self.device_connected:
             raise ConnectionError("No ADB device connected")

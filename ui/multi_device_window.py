@@ -272,39 +272,13 @@ class MultiDeviceWindow(QMainWindow):
         self._stream_items(src_panel, dest_panel, paths)
 
     def _stream_items(self, src_panel, dest_panel, paths):
-        def run():
-            for path in paths:
-                name = path.rstrip('/').split('/')[-1]
-                dest = f"{dest_panel.current_path.rstrip('/')}/{name}"
-                
-                test_cmd = ['adb', '-s', src_panel.device_serial, 'exec-out', 'test', '-d', path]
-                test_r = subprocess.run(test_cmd, capture_output=True, timeout=10)
-                is_dir = test_r.returncode == 0
-
-                if is_dir:
-                    ok = src_panel.adb_handler.stream_directory(
-                        src_panel.device_serial, path,
-                        dest_panel.device_serial, dest,
-                    )
-                else:
-                    ok = src_panel.adb_handler.stream_file(
-                        src_panel.device_serial, path,
-                        dest_panel.device_serial, dest,
-                    )
-                if not ok:
-                    return False
-            return True
-
-        def on_done(ok):
-            if ok:
-                self.status_label.setText("Stream complete")
-                dest_panel.refresh_files()
-            else:
-                self.status_label.setText("Stream failed")
-
-        self._run_modal(f"Stream to {dest_panel.device_name}", run, on_done=on_done)
-
-    
+        """Hand a cross-device drop to the panel's shared transfer logic."""
+        items = [{
+            'name': path.rstrip('/').split('/')[-1],
+            'path': path,
+            'is_dir': src_panel.is_dir_for_path(path),
+        } for path in paths]
+        src_panel.send_items_to_device(items, dest_panel)
 
     def _target_panel(self):
         for p in self.device_panels:

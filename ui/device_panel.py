@@ -2,6 +2,7 @@ import os
 import sys
 import tempfile
 import subprocess
+import time
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
@@ -13,9 +14,13 @@ from PyQt6.QtCore import QStringListModel
 from PyQt6.QtWidgets import QCompleter
 from PyQt6.QtCore import Qt, QTimer, QFileInfo, pyqtSignal, QPoint
 
+from PyQt6.QtGui import QGuiApplication
+
 from handler import ADBHandler
 from ui.widgets import DropTreeView
 from ui.task_manager import WorkerThread
+from ui import transfer
+from ui.transfer_actions import TransferActionsMixin
 
 
 class PathInput(QLineEdit):
@@ -53,7 +58,7 @@ class PathInput(QLineEdit):
         self._panel.refresh_files()
 
 
-class DevicePanel(QWidget):
+class DevicePanel(TransferActionsMixin, QWidget):
 
     cross_device_drop = pyqtSignal(str, list, str)
     close_requested = pyqtSignal()
@@ -66,6 +71,11 @@ class DevicePanel(QWidget):
 
         
         self.clipboard = {'items': [], 'operation': None}
+        self._clipboard_time = 0.0
+        self._host_clipboard_time = 0.0
+        self._last_download_dir = None
+        self._post_refresh_note = None
+        QGuiApplication.clipboard().dataChanged.connect(self._on_host_clipboard_changed)
 
         
         self.use_root = False
@@ -205,8 +215,16 @@ class DevicePanel(QWidget):
             (QKeySequence.StandardKey.Copy, self.copy_selected),
             (QKeySequence.StandardKey.Cut, self.cut_selected),
             (QKeySequence.StandardKey.Paste, self.paste_items),
+            (QKeySequence("Ctrl+Shift+C"), self.copy_to_pc_clipboard),
+            (QKeySequence("Ctrl+Shift+V"), self.paste_from_pc),
+            (QKeySequence("Ctrl+Shift+P"), self.copy_paths_to_clipboard),
+            (QKeySequence("Ctrl+D"), self.duplicate_selected),
+            (QKeySequence("Ctrl+U"), self.upload_file_to_device),
+            (QKeySequence("Ctrl+E"), self.download_selected_items),
             (QKeySequence(Qt.Key.Key_Delete), self._shortcut_delete),
             (QKeySequence(Qt.Key.Key_F2), self._shortcut_rename),
+            (QKeySequence(Qt.Key.Key_F5), self.refresh_files),
+            (QKeySequence(Qt.Key.Key_Backspace), self.go_up),
         )
         for key, handler in bindings:
             shortcut = QShortcut(key, self)
@@ -253,6 +271,13 @@ class DevicePanel(QWidget):
 
     
 
+    def _on_host_clipboard_changed(self):
+        """Remember when the PC clipboard last changed, so Ctrl+V can choose
+        between the device clipboard and files copied in Explorer."""
+        if self._closing:
+            return
+        self._host_clipboard_time = time.monotonic()
+
     def _report_error(self, message):
         """Show why an operation failed, not just that it failed."""
         detail = (self.adb_handler.last_error or "").strip()
@@ -287,7 +312,11 @@ class DevicePanel(QWidget):
             if files is not None:
                 self.all_files = files
                 self.apply_search_filter()
-                self.status_label.setText(f"Found {len(self.all_files)} items")
+                # Keep the result of the last operation visible next to the count.
+                note = self._post_refresh_note
+                self._post_refresh_note = None
+                count = f"{len(self.all_files)} items"
+                self.status_label.setText(f"{note} - {count}" if note else f"Found {count}")
             else:
                 self._report_error("Failed to list directory")
             if self._refresh_pending:
@@ -404,70 +433,8 @@ class DevicePanel(QWidget):
             })
         return selected_items
 
-    def copy_selected(self):
-        items = self.get_selected_items()
-        if not items:
-            return
-        self.clipboard = {'items': items, 'operation': 'copy'}
-        self.status_label.setText(f"Copied {len(items)} item(s)")
 
-    def cut_selected(self):
-        items = self.get_selected_items()
-        if not items:
-            return
-        self.clipboard = {'items': items, 'operation': 'cut'}
-        self.status_label.setText(f"Cut {len(items)} item(s)")
 
-    def paste_items(self):
-        if not self.clipboard or not self.clipboard['items']:
-            self.status_label.setText("Clipboard is empty")
-            return
-        dest_dir = self.current_path
-        conflicts = []
-        for item in self.clipboard['items']:
-            dest_path = f"{dest_dir}/{os.path.basename(item['path'])}"
-            if self.adb_handler.path_exists(dest_path):
-                conflicts.append(os.path.basename(item['path']))
-        if conflicts:
-            names = "\n".join(conflicts[:10])
-            more = f"\n...and {len(conflicts) - 10} more" if len(conflicts) > 10 else ""
-            reply = QMessageBox.question(
-                self, "Item(s) Already Exist",
-                f"The following already exist in the destination:\n\n{names}{more}\n\nOverwrite?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-            )
-            if reply == QMessageBox.StandardButton.No:
-                self.status_label.setText("Paste canceled")
-                return
-
-        operation = self.clipboard['operation']
-        cut_mode = operation == 'cut'
-
-        def run_paste():
-            count = 0
-            for item in self.clipboard['items']:
-                src = item['path']
-                dst = f"{dest_dir}/{os.path.basename(src)}"
-                if operation == 'copy':
-                    ok = self.adb_handler.copy_on_device(src, dst)
-                else:
-                    ok = self.adb_handler.move_on_device(src, dst)
-                if ok:
-                    count += 1
-            return count
-
-        def on_paste_done(count):
-            if count > 0:
-                if cut_mode:
-                    self.clipboard = {'items': [], 'operation': None}
-                self.status_label.setText(f"Pasted {count} item(s)")
-                self.refresh_files()
-            else:
-                self._report_error("Paste failed")
-
-        self._run_modal(f"Paste {len(self.clipboard['items'])} items", run_paste, on_done=on_paste_done)
-
-    
 
     def show_context_menu(self, position):
         index = self.tree_view.indexAt(position)
@@ -478,23 +445,41 @@ class DevicePanel(QWidget):
             indexes = self.tree_view.selectionModel().selectedRows()
         menu = QMenu()
 
-        if self.clipboard and self.clipboard['items']:
-            paste_action = menu.addAction("Paste")
-            paste_action.triggered.connect(self.paste_items)
+        clip, _, clip_panel = self._panel_clipboard()
+        host_files = transfer.host_clipboard_files()
+        if clip and clip.get('items'):
+            label = "Paste" if clip.get('operation') == 'copy' else "Paste (move)"
+            if clip_panel is not self:
+                label = f"{label} from {clip_panel.device_name}"
+            menu.addAction(f"{label}	Ctrl+V", self.paste_items)
+        if host_files:
+            menu.addAction(f"Paste {len(host_files)} file(s) from PC	Ctrl+Shift+V",
+                           self.paste_from_pc)
+        if (clip and clip.get('items')) or host_files:
             menu.addSeparator()
 
         if not indexes:
             menu.addAction("New File", self.create_new_file)
             menu.addAction("New Folder", self.create_new_folder)
-            menu.addAction("Upload to Device", self.upload_file_to_device)
-        elif len(indexes) > 1:
-            menu.addAction("Copy", self.copy_selected)
-            menu.addAction("Cut", self.cut_selected)
             menu.addSeparator()
-            menu.addAction("Delete Selected", self.delete_selected_items)
-            menu.addAction("Download to PC", self.download_selected_items)
+            menu.addAction("Upload Files...	Ctrl+U", self.upload_file_to_device)
+            menu.addAction("Upload Folder...", self.upload_folder_to_device)
+            menu.addAction("Sync Folder (skip unchanged)...", self.sync_folder_to_device)
+            menu.addSeparator()
+            menu.addAction("Copy Folder Path	Ctrl+Shift+P", self.copy_paths_to_clipboard)
+        elif len(indexes) > 1:
+            menu.addAction("Copy	Ctrl+C", self.copy_selected)
+            menu.addAction("Cut	Ctrl+X", self.cut_selected)
+            menu.addAction("Duplicate	Ctrl+D", self.duplicate_selected)
+            menu.addSeparator()
+            menu.addAction("Download to PC...	Ctrl+E", self.download_selected_items)
+            menu.addAction("Copy to PC Clipboard	Ctrl+Shift+C", self.copy_to_pc_clipboard)
+            menu.addAction("Copy Paths	Ctrl+Shift+P", self.copy_paths_to_clipboard)
+            menu.addSeparator()
             menu.addAction("Copy to Device Folder...", self.copy_selected_to)
+            menu.addAction("Move to Device Folder...", self.move_selected_to)
             menu.addAction("Batch Rename...", self.batch_rename_selected)
+            menu.addAction("Delete Selected", self.delete_selected_items)
             total_size = sum(
                 self.get_file_size_from_row(idx.row())
                 for idx in indexes
@@ -508,21 +493,33 @@ class DevicePanel(QWidget):
             item_name = self.tree_model.data(self.tree_model.index(idx.row(), 0))
             item_type = self.tree_model.data(self.tree_model.index(idx.row(), 1))
 
-            menu.addAction("Copy", self.copy_selected)
-            menu.addAction("Cut", self.cut_selected)
+            menu.addAction("Copy	Ctrl+C", self.copy_selected)
+            menu.addAction("Cut	Ctrl+X", self.cut_selected)
+            menu.addAction("Duplicate	Ctrl+D", self.duplicate_selected)
+            menu.addSeparator()
+            menu.addAction("Copy to PC Clipboard	Ctrl+Shift+C", self.copy_to_pc_clipboard)
+            menu.addAction("Copy Path	Ctrl+Shift+P", self.copy_paths_to_clipboard)
             menu.addSeparator()
 
             if item_type == "File":
                 menu.addAction("Open", lambda n=item_name: self.open_file_on_host(n))
                 menu.addAction("Save to PC...", lambda n=item_name: self.copy_file_to(n))
+                menu.addAction("Download to PC...	Ctrl+E", self.download_selected_items)
                 menu.addSeparator()
-                menu.addAction("Rename", lambda n=item_name: self.rename_item(n))
-                menu.addAction("Delete", lambda n=item_name: self.delete_item(n, is_dir=False))
+                menu.addAction("Copy to Device Folder...", self.copy_selected_to)
+                menu.addAction("Move to Device Folder...", self.move_selected_to)
+                menu.addSeparator()
+                menu.addAction("Rename	F2", lambda n=item_name: self.rename_item(n))
+                menu.addAction("Delete	Del", lambda n=item_name: self.delete_item(n, is_dir=False))
             elif item_type == "Directory":
                 menu.addAction("Save to PC...", lambda n=item_name: self.copy_folder_to(n))
+                menu.addAction("Download to PC...	Ctrl+E", self.download_selected_items)
                 menu.addSeparator()
-                menu.addAction("Rename", lambda n=item_name: self.rename_item(n))
-                menu.addAction("Delete", lambda n=item_name: self.delete_item(n, is_dir=True))
+                menu.addAction("Copy to Device Folder...", self.copy_selected_to)
+                menu.addAction("Move to Device Folder...", self.move_selected_to)
+                menu.addSeparator()
+                menu.addAction("Rename	F2", lambda n=item_name: self.rename_item(n))
+                menu.addAction("Delete	Del", lambda n=item_name: self.delete_item(n, is_dir=True))
 
         
         menu.addSeparator()
@@ -531,64 +528,6 @@ class DevicePanel(QWidget):
 
         menu.exec(self.tree_view.viewport().mapToGlobal(position))
 
-    def _populate_send_to_menu(self, menu, indexes, position):
-        if not indexes:
-            menu.addAction("No items selected").setEnabled(False)
-            return
-        items = self.get_selected_items()
-        if not items:
-            menu.addAction("No items selected").setEnabled(False)
-            return
-
-        parent = self.window()
-        if not hasattr(parent, 'device_panels'):
-            menu.addAction("No other devices").setEnabled(False)
-            return
-
-        target_devices = []
-        for panel in parent.device_panels:
-            if panel is not self and panel.adb_handler.device_connected:
-                target_devices.append(panel)
-
-        if not target_devices:
-            menu.addAction("No other devices").setEnabled(False)
-            return
-
-        for panel in target_devices:
-            action = menu.addAction(panel.device_name)
-            action.triggered.connect(
-                lambda checked=False, p=panel, its=items: self._send_items_to_device(its, p)
-            )
-
-    def _send_items_to_device(self, items, target_panel):
-        def run_stream():
-            for item in items:
-                dest = f"{target_panel.current_path.rstrip('/')}/{item['name']}"
-                if item['is_dir']:
-                    ok = self.adb_handler.stream_directory(
-                        self.device_serial, item['path'],
-                        target_panel.device_serial, dest,
-                        line_callback=lambda msg: None,
-                    )
-                else:
-                    ok = self.adb_handler.stream_file(
-                        self.device_serial, item['path'],
-                        target_panel.device_serial, dest,
-                    )
-                if not ok:
-                    return False
-            return True
-
-        def on_done(ok):
-            if ok:
-                self.status_label.setText(f"Sent {len(items)} item(s) to {target_panel.device_name}")
-                target_panel.refresh_files()
-            else:
-                self._report_error("Stream failed")
-
-        self._run_modal(f"Streaming to {target_panel.device_name}", run_stream, on_done=on_done)
-
-    
 
     def get_file_size_from_row(self, row):
         size_index = self.tree_model.index(row, 2)
@@ -764,123 +703,9 @@ class DevicePanel(QWidget):
             else:
                 self._report_error("Create failed")
 
-    def upload_file_to_device(self):
-        if not self.adb_handler.device_connected:
-            return
-        file_path, _ = QFileDialog.getOpenFileName(self, "Select File to Upload")
-        if not file_path:
-            return
-        filename = os.path.basename(file_path)
-        remote = f"{self.current_path.rstrip('/')}/{filename}"
-        self._run_modal("Uploading", self.adb_handler.push_file, file_path, remote,
-                        on_done=lambda _: self.status_label.setText(f"Uploaded {filename}"),
-                        on_error=lambda: self._report_error(f"Failed to upload {filename}"))
 
-    def upload_files_and_folders(self, files):
-        if not self.adb_handler.device_connected:
-            return
-        total = len(files)
 
-        def run_upload():
-            count = 0
-            for file_path, rel_dir in files:
-                filename = os.path.basename(file_path)
-                if rel_dir and rel_dir != ".":
-                    remote_dir = f"{self.current_path.rstrip('/')}/{rel_dir}".replace("\\", "/")
-                else:
-                    remote_dir = self.current_path.rstrip("/")
-                if rel_dir:
-                    self.adb_handler.create_folder(remote_dir)
-                remote = f"{remote_dir}/{filename}".replace("\\", "/")
-                ok = self.adb_handler.push_file(file_path, remote)
-                if not ok:
-                    return count
-                count += 1
-            return count
 
-        def on_done(count):
-            self.status_label.setText(f"Uploaded {count}/{total} files")
-            self.refresh_files()
-
-        self._run_modal(f"Upload {total} files", run_upload, on_done=on_done)
-
-    def download_selected_items(self):
-        if not self.adb_handler.device_connected:
-            return
-        indexes = self.tree_view.selectionModel().selectedRows()
-        if not indexes:
-            return
-        save_dir = QFileDialog.getExistingDirectory(self, "Download Location")
-        if not save_dir:
-            return
-        pairs = []
-        for index in indexes:
-            name = self.tree_model.data(self.tree_model.index(index.row(), 0))
-            typ = self.tree_model.data(self.tree_model.index(index.row(), 1))
-            if not name or name == "..":
-                continue
-            remote = f"{self.current_path.rstrip('/')}/{name}"
-            local = os.path.join(save_dir, name)
-            pairs.append((remote, local))
-
-        def run_dl():
-            count = 0
-            for remote, local in pairs:
-                if self.adb_handler.pull_file(remote, local):
-                    count += 1
-            return count
-
-        def on_done(count):
-            self.status_label.setText(f"Downloaded {count} files")
-
-        self._run_modal(f"Download {len(pairs)} files", run_dl, on_done=on_done)
-
-    def copy_selected_to(self):
-        if not self.adb_handler.device_connected:
-            return
-        indexes = self.tree_view.selectionModel().selectedRows()
-        if not indexes:
-            return
-        names = []
-        for index in indexes:
-            name = self.tree_model.data(self.tree_model.index(index.row(), 0))
-            is_dir = self.tree_model.data(self.tree_model.index(index.row(), 1)) == "Directory"
-            if name and name != "..":
-                names.append((name, is_dir))
-        if not names:
-            return
-
-        from select_directory_dialog import SelectDirectoryDialog
-        dialog = SelectDirectoryDialog(
-            self, self.adb_handler, self.current_path, self.root_path, self.use_root
-        )
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            target = dialog.get_selected_path()
-            if not target:
-                return
-            if QMessageBox.question(self, "Copy", f"Copy {len(names)} items to '{target}'?",
-                                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) == QMessageBox.StandardButton.No:
-                return
-
-            def run_copy():
-                count = 0
-                for name, is_dir in names:
-                    src = f"{self.current_path.rstrip('/')}/{name}"
-                    dst = f"{target.rstrip('/')}/{name}"
-                    try:
-                        if self.adb_handler.path_exists(dst):
-                            self.adb_handler.delete_item(dst, is_dir)
-                        if self.adb_handler.copy_on_device(src, dst):
-                            count += 1
-                    except Exception:
-                        pass
-                return count
-
-            def on_done(count):
-                self.status_label.setText(f"Copied {count} items")
-                self.refresh_files()
-
-            self._run_modal(f"Copy {len(names)} items", run_copy, on_done=on_done)
 
     def batch_rename_selected(self):
         if not self.adb_handler.device_connected:
@@ -913,28 +738,9 @@ class DevicePanel(QWidget):
 
     
 
-    def handle_drop_event(self, event):
-        if not self.adb_handler.device_connected:
-            return
-        urls = event.mimeData().urls()
-        if not urls:
-            return
-        paths = [u.toLocalFile() for u in urls]
-        files_to_upload = []
-        for path in paths:
-            if os.path.isdir(path):
-                for root, _, files in os.walk(path):
-                    for f in files:
-                        abs_file = os.path.join(root, f)
-                        rel_dir = os.path.relpath(root, path)
-                        files_to_upload.append((abs_file, rel_dir))
-            else:
-                files_to_upload.append((path, ""))
-        self.upload_files_and_folders(files_to_upload)
 
-    
-
-    def _run_modal(self, title, fn, *args, on_done=None, on_error=None, refresh=False):
+    def _run_modal(self, title, fn, *args, on_done=None, on_error=None, refresh=False,
+                   relay=None):
         task = WorkerThread(title, fn, *args)
 
         dlg = QDialog(self)
@@ -945,7 +751,12 @@ class DevicePanel(QWidget):
         layout.setContentsMargins(16, 16, 16, 16)
 
         label = QLabel(f"{title}...")
+        label.setWordWrap(True)
         layout.addWidget(label)
+
+        if relay is not None:
+            # Worker threads emit progress lines; Qt queues them onto the GUI thread.
+            relay.message.connect(lambda text: label.setText(text[-120:]))
 
         bar = QProgressBar()
         bar.setRange(0, 0)

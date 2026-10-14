@@ -5,7 +5,10 @@ A graphical file manager for Android devices connected via ADB (Android Debug Br
 - **Multi-device support** - Select multiple connected Android devices
 - **Device-to-device transfers** - Copy files from one android device to another efficiently
 - **Multi-Panel viewer** - Side-by-side panel view
-- **Full file operations** - Push, pull, delete, rename, and copy/paste files
+- **Full file operations** - Push, pull, delete, rename, duplicate and copy/paste files
+- **Clipboard that spans both worlds** - Copy on the device and paste in Explorer, or the reverse
+- **Conflict handling** - Keep both, overwrite or skip, with apply-to-all
+- **Folder sync** - Re-upload a folder and only the changed files move
 - **Two-way file transfer** - Transfer files between computer and device easily
 - **Familiar file explorer navigation** - Browse device storage like a desktop file manager
 - **File search** - Quickly find files on your device
@@ -13,6 +16,52 @@ A graphical file manager for Android devices connected via ADB (Android Debug Br
 - **Drag-and-drop support** - Intuitive file transfers
 - **App Installer** - Install APK or XAPK files
 - **Wireless ADB** - Connect to devices over network (no USB required)
+
+## Moving files around
+Every transfer works the way it does in a desktop file manager, and all of them
+resolve conflicts the same way: **Keep both** (adds "(2)" to the name),
+**Overwrite** or **Skip**, with an "apply to the rest" option.
+
+**From the PC to the device**
+- Drag files or folders from Explorer/Finder onto a panel
+- `Ctrl+V` in a panel after copying files in Explorer
+- Right-click > Upload Files / Upload Folder
+- Right-click > Sync Folder - uploads only what changed, so re-running is cheap
+
+**From the device to the PC**
+- Drag items out of a panel onto the desktop, Explorer or any app that takes files
+- `Ctrl+Shift+C` puts the selection on the PC clipboard, then paste in Explorer
+- `Ctrl+E` or right-click > Download to PC for a chosen folder (any size)
+- Double-click a file to open it on the PC
+
+**Inside one device**
+- `Ctrl+C` / `Ctrl+X` / `Ctrl+V` between folders and between panels
+- Drag inside a panel to move, hold `Ctrl` while dropping to copy
+- `Ctrl+D` duplicates in place
+- Right-click > Copy / Move to Device Folder for a folder picker
+
+**Between two devices**
+- Drag from one panel to another to copy, hold `Shift` while dropping to move
+- Copy in one panel and paste in the other
+- Right-click > Send to Device > Copy/Move to <device>
+
+Files stream directly between devices without being staged on the PC.
+
+### Keyboard shortcuts
+| Shortcut | Action |
+| --- | --- |
+| `Ctrl+C` / `Ctrl+X` / `Ctrl+V` | Copy / Cut / Paste (device items, or files copied on the PC) |
+| `Ctrl+Shift+C` | Copy the selection to the PC clipboard |
+| `Ctrl+Shift+V` | Paste files from the PC clipboard |
+| `Ctrl+Shift+P` | Copy the full device path as text |
+| `Ctrl+D` | Duplicate in place |
+| `Ctrl+U` / `Ctrl+E` | Upload files / Download selection |
+| `F2` / `Del` | Rename / Delete |
+| `F5` / `Backspace` | Refresh / Go up |
+
+Dragging to the PC has to fetch the files before the drag can begin, so it is
+limited to selections under 24 MB; larger ones go through Download to PC. Raise
+the limit with `ADB_EXPLORER_DRAG_LIMIT_MB` if your connection is fast.
 
 ## Installation
 ### Option 1: Download Executable (Windows)

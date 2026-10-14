@@ -1,0 +1,196 @@
+"""Live view-mode and thumbnail tests - they need one device connected.
+
+    python tests/test_views.py
+
+Covers the eight view modes, the cheap thumbnail routes (EXIF for JPEG, head
+plus tail for video), EXIF rotation, lazy loading, and the on-disk cache.
+"""
+import os
+import sys
+import time
+import tempfile
+
+os.environ['QT_QPA_PLATFORM'] = 'offscreen'
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+os.chdir(ROOT)
+
+from PyQt6.QtWidgets import QApplication
+from PyQt6.QtCore import QSettings
+from PyQt6.QtGui import QImage
+
+from handler import ADBHandler
+from ui.theme import LIGHT
+from ui.multi_device_window import MultiDeviceWindow
+from ui import thumbnails, views
+
+app = QApplication(sys.argv)
+app.setStyle("Fusion")
+app.setStyleSheet(LIGHT)
+
+PASS, FAIL = [], []
+
+
+def check(name, condition, detail=''):
+    (PASS if condition else FAIL).append(name)
+    print(('  PASS  ' if condition else '  FAIL  ') + name + (f'  [{detail}]' if detail else ''))
+
+
+def pump(seconds=1.0, until=None):
+    end = time.time() + seconds
+    while time.time() < end:
+        app.processEvents()
+        if until and until():
+            return True
+        time.sleep(0.02)
+    return False
+
+
+QSettings("ADB Explorer", "ADB Explorer").clear()
+window = MultiDeviceWindow()
+window.resize(1100, 700)
+window.show()
+pump(4)
+panel = window.device_panels[0]
+h = panel.adb_handler
+
+BASE = "/sdcard/adbx_view_tests"
+h.delete_item(BASE, is_dir=True, missing_ok=True)
+h.create_folder(BASE)
+
+# a real photo to work with, copied into our own folder
+photos = [f for f in (h.list_directory("/sdcard/DCIM/Camera") or [])
+          if f.name.lower().endswith('.jpg')][:3]
+if not photos:
+    print("No JPEG files on the device to test with; skipping.")
+    sys.exit(0)
+for photo in photos:
+    h.copy_on_device(photo.path, f"{BASE}/{photo.name}")
+h._shell_action(f"echo hello > '{BASE}/plain.txt'", 'seed')
+
+panel.current_path = BASE
+panel.refresh_files()
+pump(6, until=lambda: not panel._loading)
+pump(0.5)
+
+print("\n=== 1. every view mode is reachable ===")
+for mode, label, px in views.VIEW_MODES:
+    panel.set_view_mode(mode)
+    pump(0.3)
+    view = panel.tree_view
+    expected = 'DropTreeView' if mode == views.DETAILS else 'FileListView'
+    check(f"{label} switches the view",
+          type(view).__name__ == expected and view.iconSize().width() == px,
+          f"{type(view).__name__} icon={view.iconSize().width()}")
+
+check("the model is shared by both views",
+      panel._tree.model() is panel._list.model())
+check("the selection is shared by both views",
+      panel._tree.selectionModel() is panel._list.selectionModel())
+
+print("\n=== 2. the view choice is remembered ===")
+panel.set_view_mode(views.TILES)
+check("the mode is stored",
+      QSettings("ADB Explorer", "ADB Explorer").value("view_mode") == views.TILES)
+panel.zoom_view(1)
+check("Ctrl+wheel zooms up the ladder", panel.view_mode == views.ICONS_M, panel.view_mode)
+panel.zoom_view(-1)
+check("and back down", panel.view_mode == views.TILES, panel.view_mode)
+
+print("\n=== 3. thumbnails appear, and only where they are visible ===")
+panel.set_view_mode(views.ICONS_L)
+pump(1)
+
+
+def thumbed_rows():
+    found = 0
+    for row in range(panel.tree_model.rowCount()):
+        icon = panel.tree_model.item(row, 0).icon()
+        sizes = icon.availableSizes()
+        if sizes and sizes[0].width() > 40:
+            found += 1
+    return found
+
+
+pump(25, until=lambda: thumbed_rows() >= len(photos))
+check("photos got real thumbnails", thumbed_rows() >= len(photos),
+      f"{thumbed_rows()} of {len(photos)}")
+check("a text file did not", thumbnails.can_thumbnail("plain.txt", False) is False)
+
+print("\n=== 4. the cheap route is the one being used ===")
+photo = photos[0]
+started = time.time()
+data, orientation = thumbnails._image_bytes(h.device_serial, f"{BASE}/{photo.name}",
+                                            photo.size, '.jpg')
+elapsed = time.time() - started
+check("a thumbnail is far smaller than the photo",
+      data is not None and len(data) < photo.size / 10,
+      f"{len(data) if data else 0} vs {photo.size} bytes")
+check("and arrives quickly", elapsed < 3, f"{elapsed:.2f}s")
+
+image = QImage()
+image.loadFromData(data)
+rotated = thumbnails.apply_orientation(image, orientation)
+if orientation in (6, 8):
+    check("a sideways photo is turned upright",
+          rotated.width() == image.height() and rotated.height() == image.width(),
+          f"orientation={orientation}")
+else:
+    check("an upright photo is left alone", rotated.size() == image.size(),
+          f"orientation={orientation}")
+
+print("\n=== 5. the cache answers the second time ===")
+cache = thumbnails.ThumbnailCache()
+item = {'name': photo.name, 'path': f"{BASE}/{photo.name}",
+        'size': photo.size, 'modified': photo.date_modified}
+key = cache.key_for(h.device_serial, item, 96)
+got = {}
+cache.ready.connect(lambda k, p: got.update({k: p}))
+# request() answers straight away when the picture is already cached, and
+# through the signal when it has to be fetched.
+immediate = cache.request(h.device_serial, item, 96)
+pump(20, until=lambda: bool(got) or immediate is not None)
+check("the thumbnail was produced", bool(got) or immediate is not None)
+check("it is on disk", os.path.isfile(os.path.join(thumbnails.cache_dir(), key + '.png')))
+
+fresh = thumbnails.ThumbnailCache()
+started = time.time()
+hit = fresh.cached(key)
+check("a new session reads it from disk", hit is not None and time.time() - started < 0.5)
+
+print("\n=== 6. video thumbnails degrade without ffmpeg ===")
+has_ffmpeg = bool(thumbnails.find_ffmpeg())
+check("video support follows ffmpeg",
+      thumbnails.can_thumbnail("clip.mp4", False) == has_ffmpeg,
+      f"ffmpeg={'found' if has_ffmpeg else 'missing'}")
+check("the menu entry reflects that",
+      panel._video_thumb_action.isEnabled() == has_ffmpeg)
+
+print("\n=== 7. the MP4 index check that keeps video cheap ===")
+# an ftyp box of exactly 32 bytes, followed by a complete 16-byte moov
+FTYP = b'\x00\x00\x00\x20ftyp' + b'isom' + b'\x00' * 20
+check("an index at the front is detected",
+      thumbnails.has_moov(FTYP + b'\x00\x00\x00\x10moov' + b'\x00' * 8) is True)
+check("an index that runs past the fetched bytes is not",
+      thumbnails.has_moov(FTYP + b'\x00\x40\x00\x00moov' + b'\x00' * 8) is False)
+check("no index at all is not",
+      thumbnails.has_moov(FTYP + b'\x00\x00\x00\x10mdat' + b'\x00' * 8) is False)
+
+sparse = os.path.join(tempfile.gettempdir(), 'adbx_sparse_test.bin')
+thumbnails._write_sparse(sparse, 10_000_000, b'HEAD' * 4, b'TAIL' * 4)
+with open(sparse, 'rb') as fh:
+    head_read = fh.read(16)
+    fh.seek(10_000_000 - 16)
+    tail_read = fh.read(16)
+check("head and tail land at their real offsets",
+      os.path.getsize(sparse) == 10_000_000 and head_read == b'HEAD' * 4
+      and tail_read == b'TAIL' * 4)
+os.remove(sparse)
+
+h.delete_item(BASE, is_dir=True, missing_ok=True)
+print(f"\n{'=' * 60}\nPASSED {len(PASS)}  FAILED {len(FAIL)}")
+if FAIL:
+    print("FAILURES:")
+    for name in FAIL:
+        print("  -", name)
+sys.exit(1 if FAIL else 0)

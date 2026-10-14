@@ -5,6 +5,8 @@ A graphical file manager for Android devices connected via ADB (Android Debug Br
 - **Multi-device support** - Select multiple connected Android devices
 - **Device-to-device transfers** - Copy files from one android device to another efficiently
 - **Multi-Panel viewer** - Side-by-side panel view
+- **Eight view modes** - Icons in four sizes, List, Details, Tiles and Content, with Ctrl+wheel zoom
+- **Thumbnails** - Photos and (with ffmpeg) video frames, fetched cheaply and cached
 - **Full file operations** - Push, pull, delete, rename, duplicate and copy/paste files
 - **Clipboard that spans both worlds** - Copy on the device and paste in Explorer, or the reverse
 - **Conflict handling** - Keep both, merge, replace or skip, with apply-to-all
@@ -17,6 +19,35 @@ A graphical file manager for Android devices connected via ADB (Android Debug Br
 - **Drag-and-drop support** - Intuitive file transfers
 - **App Installer** - Install APK or XAPK files
 - **Wireless ADB** - Connect to devices over network (no USB required)
+
+## Looking at files
+The view button in each panel's toolbar offers the same eight modes as
+Explorer - Extra large / Large / Medium / Small icons, List, Details, Tiles
+and Content - on `Ctrl+1` to `Ctrl+8`, or `Ctrl+wheel` to zoom through them.
+The choice is remembered between runs, and each panel can show a different
+one.
+
+### Thumbnails
+Pictures are read from the device, so they are fetched as cheaply as possible
+and only for the rows actually on screen:
+
+- **JPEG** - only the first 128 KB are read, which holds the thumbnail the
+  camera embedded in the EXIF block. A 2.4 MB photo costs about 29 KB and a
+  tenth of a second, and the EXIF rotation is applied so portrait photos are
+  upright.
+- **PNG, WebP, GIF, BMP** - fetched whole, but only below 2 MB.
+- **Video** - needs `ffmpeg` on the PC (on `PATH` or in `FFMPEG_PATH`).
+  Instead of pulling a whole clip, the head is read, and the tail too if the
+  index lives at the end; they are written into a sparse local file at their
+  real offsets so ffmpeg can decode one frame. A 9.6 MB clip usually costs
+  1.5 MB. Without ffmpeg, videos simply get a file icon and the menu entry
+  says so.
+
+Thumbnails are cached on disk under `%LOCALAPPDATA%\adb_explorer\thumbnails`
+(`~/.cache/adb_explorer` elsewhere), keyed by path, size and timestamp, so a
+folder costs nothing to revisit. The view menu can also turn video thumbnails
+off, or turn thumbnails on for the List and Details views, where they are off
+by default because those rows are small and every one costs a read.
 
 ## Moving files around
 Every transfer works the way it does in a desktop file manager, and all of
@@ -85,14 +116,16 @@ Raise the 24 MB drag-out limit with `ADB_EXPLORER_DRAG_LIMIT_MB` if your
 connection is fast.
 
 ### Tests
-`tests/test_transfers.py` exercises these paths against a real connected
-device, including the destructive ones (replace, rollback, cancellation,
-partial failure). It works inside `/sdcard/adbx_cr_tests` and cleans up after
-itself:
+Both suites run against a real connected device and clean up after
+themselves:
 
 ```bash
-python tests/test_transfers.py
+python tests/test_transfers.py   # copy, move, conflicts, cancel, failures
+python tests/test_views.py       # view modes, thumbnails, cache, rotation
 ```
+
+`test_transfers.py` covers the destructive paths deliberately - replace,
+rollback, cancellation and partial failure - inside `/sdcard/adbx_cr_tests`.
 
 ## Installation
 ### Option 1: Download Executable (Windows)

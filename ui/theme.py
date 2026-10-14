@@ -72,6 +72,23 @@ QPushButton#back_btn:pressed {
 #nav_container QPushButton:pressed {
     background: #dce8f5;
 }
+QToolButton#view_btn {
+    background: transparent;
+    border: 1px solid #d8d8d8;
+    border-radius: 4px;
+    padding: 3px 6px;
+    font-size: 13px;
+    color: #444;
+}
+QToolButton#view_btn:hover {
+    background: #f0f7ff;
+    border-color: #4a8fe0;
+    color: #4a8fe0;
+}
+QToolButton#view_btn::menu-indicator {
+    image: none;
+    width: 0;
+}
 #search_bar, QLineEdit {
     background: #ffffff;
     border: 1px solid #d8d8d8;
@@ -420,6 +437,23 @@ QPushButton#back_btn:pressed {
 }
 #nav_container QPushButton:pressed {
     background: #45475a;
+}
+QToolButton#view_btn {
+    background: transparent;
+    border: 1px solid #45475a;
+    border-radius: 4px;
+    padding: 3px 6px;
+    font-size: 13px;
+    color: #a6adc8;
+}
+QToolButton#view_btn:hover {
+    background: #313244;
+    border-color: #89b4fa;
+    color: #89b4fa;
+}
+QToolButton#view_btn::menu-indicator {
+    image: none;
+    width: 0;
 }
 #search_bar, QLineEdit {
     background: #181825;

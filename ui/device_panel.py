@@ -8,18 +8,22 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QMessageBox, QLineEdit, QMenu, QFileDialog, QInputDialog,
     QLabel, QCheckBox, QFileIconProvider, QProgressBar, QDialog, QTreeView,
+    QStackedWidget, QToolButton,
 )
-from PyQt6.QtGui import QStandardItemModel, QStandardItem, QAction, QKeySequence, QShortcut
+from PyQt6.QtGui import (QStandardItemModel, QStandardItem, QAction, QKeySequence,
+                         QShortcut, QIcon)
 from PyQt6.QtCore import QStringListModel
 from PyQt6.QtWidgets import QCompleter
-from PyQt6.QtCore import Qt, QTimer, QFileInfo, pyqtSignal, QPoint
+from PyQt6.QtCore import Qt, QTimer, QFileInfo, pyqtSignal, QPoint, QEvent
 
 from PyQt6.QtGui import QGuiApplication
 
+from PyQt6.QtCore import QSettings, QSize
+
 from handler import ADBHandler
-from ui.widgets import DropTreeView
 from ui.task_manager import WorkerThread
-from ui import transfer
+from ui import transfer, thumbnails, views
+from ui.views import DropTreeView, FileListView
 from ui.transfer_actions import TransferActionsMixin
 
 
@@ -77,6 +81,9 @@ class DevicePanel(TransferActionsMixin, QWidget):
         self._last_download_dir = None
         self._post_refresh_note = None
         self._drag_hint_shown = False
+        self._items_by_name = {}
+        self._thumb_keys = {}
+        self._thumb_generation = 0
         # Transfer workers that must finish before the panel may be deleted.
         self._transfer_tasks = set()
         QGuiApplication.clipboard().dataChanged.connect(self._on_host_clipboard_changed)
@@ -100,8 +107,15 @@ class DevicePanel(TransferActionsMixin, QWidget):
         self.path_history = [self.current_path]
         self.all_files = []
 
+        self._thumbs = thumbnails.ThumbnailCache(self)
+        self._thumbs.ready.connect(self._apply_thumbnail)
+        self._thumb_timer = QTimer(self)
+        self._thumb_timer.setSingleShot(True)
+        self._thumb_timer.timeout.connect(self._load_visible_thumbnails)
+
         self._setup_ui()
         self._setup_context_menu()
+        self._restore_view_mode()
         self.update_path_display()
 
     @property
@@ -169,6 +183,14 @@ class DevicePanel(TransferActionsMixin, QWidget):
         refresh_btn.clicked.connect(self.refresh_files)
         nav_layout.addWidget(refresh_btn)
 
+        self.view_btn = QToolButton()
+        self.view_btn.setText("▦")
+        self.view_btn.setToolTip("Change the view (Ctrl+1 to Ctrl+8, or Ctrl+wheel)")
+        self.view_btn.setObjectName("view_btn")
+        self.view_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.view_btn.setMenu(self._build_view_menu())
+        nav_layout.addWidget(self.view_btn)
+
         nav_container = QWidget()
         nav_container.setObjectName("panel_nav")
         nav_container.setLayout(nav_layout)
@@ -182,22 +204,37 @@ class DevicePanel(TransferActionsMixin, QWidget):
         layout.addWidget(self.search_bar)
 
         
-        self.tree_view = DropTreeView(self, self)
         self.tree_model = QStandardItemModel()
         self.tree_model.setHorizontalHeaderLabels(['Name', 'Type', 'Size', 'Permissions', 'Modified'])
-        self.tree_view.setModel(self.tree_model)
-        self.tree_view.setSelectionMode(QTreeView.SelectionMode.ExtendedSelection)
-        self.tree_view.setColumnHidden(4, True)
-        header = self.tree_view.header()
+
+        self._tree = DropTreeView(self, self)
+        self._tree.setModel(self.tree_model)
+        self._tree.setSelectionMode(QTreeView.SelectionMode.ExtendedSelection)
+        self._tree.setColumnHidden(4, True)
+        header = self._tree.header()
         header.setStretchLastSection(False)
         header.setSectionResizeMode(0, header.ResizeMode.Stretch)
         for col in (1, 2, 3, 4):
             header.setSectionResizeMode(col, header.ResizeMode.ResizeToContents)
-        self.tree_view.doubleClicked.connect(self.handle_double_click)
-        self.tree_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.tree_view.customContextMenuRequested.connect(self.show_context_menu)
+
+        self._list = FileListView(self, self)
+        self._list.setModel(self.tree_model)
+        # One selection model, so switching views keeps the selection.
+        self._list.setSelectionModel(self._tree.selectionModel())
+
+        self._view_stack = QStackedWidget()
+        self._view_stack.addWidget(self._tree)
+        self._view_stack.addWidget(self._list)
+
+        for view in (self._tree, self._list):
+            view.doubleClicked.connect(self.handle_double_click)
+            view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            view.customContextMenuRequested.connect(self.show_context_menu)
+            view.viewport().installEventFilter(self)
+            view.verticalScrollBar().valueChanged.connect(self._schedule_thumbnails)
+
         self._setup_shortcuts()
-        layout.addWidget(self.tree_view)
+        layout.addWidget(self._view_stack)
 
         
         self.status_label = QLabel("Ready")
@@ -208,6 +245,159 @@ class DevicePanel(TransferActionsMixin, QWidget):
             self.refresh_files()
         else:
             self.status_label.setText("No ADB device connected")
+
+    # ----------------------------------------------------------- views -----
+
+    @property
+    def tree_view(self):
+        """The view currently on screen.
+
+        Everything else in the panel works through this, so a new view mode
+        needs no changes anywhere but here.
+        """
+        return self._view_stack.currentWidget()
+
+    def _build_view_menu(self):
+        menu = QMenu(self)
+        self._view_actions = {}
+        for number, (mode, label, _) in enumerate(views.VIEW_MODES, start=1):
+            action = menu.addAction(f"{label}\tCtrl+{number}")
+            action.setCheckable(True)
+            action.triggered.connect(lambda checked=False, m=mode: self.set_view_mode(m))
+            self._view_actions[mode] = action
+
+        menu.addSeparator()
+        self._video_thumb_action = menu.addAction("Video thumbnails")
+        self._video_thumb_action.setCheckable(True)
+        self._video_thumb_action.setChecked(self._video_thumbnails_wanted())
+        if not thumbnails.find_ffmpeg():
+            self._video_thumb_action.setEnabled(False)
+            self._video_thumb_action.setText("Video thumbnails (needs ffmpeg)")
+            self._video_thumb_action.setToolTip(
+                "Install ffmpeg and put it on PATH, or set FFMPEG_PATH, to get "
+                "a frame from each video")
+        self._video_thumb_action.toggled.connect(self._set_video_thumbnails)
+
+        self._small_thumb_action = menu.addAction("Thumbnails in List and Details")
+        self._small_thumb_action.setCheckable(True)
+        self._small_thumb_action.setChecked(self._small_thumbnails_wanted())
+        self._small_thumb_action.setToolTip(
+            "Also fetch pictures for the small views, which costs a read per file")
+        self._small_thumb_action.toggled.connect(self._set_small_thumbnails)
+        return menu
+
+    def _small_thumbnails_wanted(self):
+        return self._settings().value("small_thumbnails", False, type=bool)
+
+    def _set_small_thumbnails(self, enabled):
+        self._settings().setValue("small_thumbnails", bool(enabled))
+        self._schedule_thumbnails(immediate=True)
+
+    @staticmethod
+    def _settings():
+        return QSettings("ADB Explorer", "ADB Explorer")
+
+    def _video_thumbnails_wanted(self):
+        if not thumbnails.find_ffmpeg():
+            return False
+        return self._settings().value("video_thumbnails", True, type=bool)
+
+    def _set_video_thumbnails(self, enabled):
+        self._settings().setValue("video_thumbnails", bool(enabled))
+        self._thumbs.clear_memory()
+        self._schedule_thumbnails(immediate=True)
+
+    def _restore_view_mode(self):
+        saved = self._settings().value("view_mode", views.DETAILS, type=str)
+        known = {mode for mode, _, _ in views.VIEW_MODES}
+        self.set_view_mode(saved if saved in known else views.DETAILS, remember=False)
+
+    def set_view_mode(self, mode, remember=True):
+        self.view_mode = mode
+        if mode == views.DETAILS:
+            self._view_stack.setCurrentWidget(self._tree)
+            self._tree.setIconSize(QSize(16, 16))
+        else:
+            self._list.apply_mode(mode)
+            self._view_stack.setCurrentWidget(self._list)
+
+        for key, action in getattr(self, '_view_actions', {}).items():
+            action.setChecked(key == mode)
+        if remember:
+            self._settings().setValue("view_mode", mode)
+
+        self._schedule_thumbnails(immediate=True)
+
+    def zoom_view(self, step):
+        """Walk the view ladder, as Ctrl+wheel does in a file manager."""
+        order = views.ZOOM_ORDER
+        try:
+            index = order.index(self.view_mode)
+        except ValueError:
+            index = order.index(views.DETAILS)
+        self.set_view_mode(order[max(0, min(len(order) - 1, index + step))])
+
+    def eventFilter(self, source, event):
+        if event.type() == QEvent.Type.Wheel and (
+                event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+            self.zoom_view(1 if event.angleDelta().y() > 0 else -1)
+            return True
+        return super().eventFilter(source, event)
+
+    # ------------------------------------------------------ thumbnails -----
+
+    def _schedule_thumbnails(self, *args, immediate=False):
+        """Ask for thumbnails shortly after the view settles."""
+        if self._closing:
+            return
+        if not hasattr(self, '_thumb_timer'):
+            return
+        self._thumb_timer.start(0 if immediate else 140)
+
+    def _load_visible_thumbnails(self):
+        """Fetch thumbnails only for what is actually on screen."""
+        if self._closing or not self._items_by_name:
+            return
+        px = views.thumbnail_px(self.view_mode)
+        if not px and self._small_thumbnails_wanted():
+            px = max(16, views.icon_px(self.view_mode))
+        if not px:
+            return
+
+        view = self.tree_view
+        viewport = view.viewport().rect().adjusted(0, -px * 2, 0, px * 2)
+        videos = self._video_thumbnails_wanted()
+        serial = self.device_serial
+
+        for row in range(self.tree_model.rowCount()):
+            index = self.tree_model.index(row, 0)
+            if not view.visualRect(index).intersects(viewport):
+                continue
+            name = self.tree_model.data(index)
+            item = self._items_by_name.get(name)
+            if not item or not thumbnails.can_thumbnail(name, False, videos):
+                continue
+
+            key = self._thumbs.key_for(serial, item, px)
+            self._thumb_keys[key] = name
+            pixmap = self._thumbs.request(serial, item, px)
+            if pixmap is not None:
+                self._apply_thumbnail(key, pixmap)
+
+    def _apply_thumbnail(self, key, pixmap):
+        """Put a finished thumbnail on its row, if that row is still shown."""
+        if self._closing:
+            return
+        name = self._thumb_keys.get(key)
+        if not name:
+            return
+        standard_item = self._items_by_name.get(name, {}).get('item')
+        if standard_item is None:
+            return
+        try:
+            standard_item.setIcon(QIcon(pixmap))
+        except RuntimeError:
+            pass
 
     def _setup_context_menu(self):
         self.tree_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -229,6 +419,9 @@ class DevicePanel(TransferActionsMixin, QWidget):
             (QKeySequence(Qt.Key.Key_F2), self._shortcut_rename),
             (QKeySequence(Qt.Key.Key_F5), self.refresh_files),
             (QKeySequence(Qt.Key.Key_Backspace), self.go_up),
+        ) + tuple(
+            (QKeySequence(f"Ctrl+{number}"), lambda m=mode: self.set_view_mode(m))
+            for number, (mode, _, _) in enumerate(views.VIEW_MODES, start=1)
         )
         for key, handler in bindings:
             shortcut = QShortcut(key, self)
@@ -392,6 +585,10 @@ class DevicePanel(TransferActionsMixin, QWidget):
     def populate_view(self, files):
         self.tree_model.clear()
         self.tree_model.setHorizontalHeaderLabels(['Name', 'Type', 'Size', 'Permissions', 'Modified'])
+        self._items_by_name = {}
+        self._thumb_keys = {}
+        # Results for the previous folder are no longer wanted.
+        self._thumbs.new_generation()
         if files is None:
             return
 
@@ -414,6 +611,14 @@ class DevicePanel(TransferActionsMixin, QWidget):
                     icon = self._icon_provider.icon(QFileInfo(f"x{ext}"))
                     self._icon_cache[ext] = icon if not icon.isNull() else self._file_icon
                 name_item.setIcon(self._icon_cache[ext])
+            self._items_by_name[file_item.name] = {
+                'name': file_item.name,
+                'path': file_item.path,
+                'size': file_item.size,
+                'modified': file_item.date_modified,
+                'is_dir': file_item.is_dir,
+                'item': name_item,
+            }
             self.tree_model.appendRow([
                 name_item,
                 QStandardItem("Directory" if file_item.is_dir else "File"),
@@ -422,8 +627,9 @@ class DevicePanel(TransferActionsMixin, QWidget):
                 QStandardItem(file_item.date_modified),
             ])
         for i in range(5):
-            self.tree_view.resizeColumnToContents(i)
+            self._tree.resizeColumnToContents(i)
         self.path_display.update_completions(files)
+        self._schedule_thumbnails(immediate=True)
 
     def handle_double_click(self, index):
         name_index = self.tree_model.index(index.row(), 0)

@@ -47,6 +47,23 @@ python main.py
 - ADB (Android Debug Bridge) must be installed and accessible from command line
 - For USB connections: Android device with USB debugging enabled
 - For wireless connections: Device and computer on the same network
+ADB Explorer looks for `adb` on your `PATH` first, then in the usual SDK
+locations (`%LOCALAPPDATA%\Android\Sdk\platform-tools` on Windows,
+`~/Library/Android/sdk/platform-tools` on macOS, `~/Android/Sdk/platform-tools`
+and `/usr/bin` on Linux). If it lives somewhere else, point `ADB_PATH` at the
+executable:
+
+```bash
+# Windows (PowerShell)
+$env:ADB_PATH = "C:\adb\adb.exe"
+# macOS / Linux
+export ADB_PATH=/opt/platform-tools/adb
+```
+
+If adb cannot be found at all, the app says so on startup instead of failing
+silently. Non-standard ADB server endpoints are honoured through the usual
+`ANDROID_ADB_SERVER_ADDRESS` / `ANDROID_ADB_SERVER_PORT` variables.
+
 ### Installing ADB
 **Windows:**
 - Download [Android SDK Platform Tools](https://developer.android.com/studio/releases/platform-tools)

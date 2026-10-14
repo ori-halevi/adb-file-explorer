@@ -71,7 +71,11 @@ class SelectDirectoryDialog(QDialog):
         try:
             files = self.adb_handler.list_directory(self.current_path, use_root=self.use_root)
             if files is None:
-                self.status_label.setText("Failed to load directories")
+                reason = (self.adb_handler.last_error or "").splitlines()
+                self.status_label.setText(
+                    f"Failed to load directories: {reason[0]}" if reason
+                    else "Failed to load directories"
+                )
                 return
                 
             dirs = sorted([f for f in files if f.is_dir], key=lambda x: x.name.lower())

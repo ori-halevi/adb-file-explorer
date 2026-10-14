@@ -5,9 +5,12 @@ suppress_console()
 
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
+from handler import ADBNotFoundError, find_adb
 from logging_config import setup_logging
 from ui.theme import LIGHT
 from ui.multi_device_window import MultiDeviceWindow
+
+ADB_HELP_URL = "https://developer.android.com/studio/releases/platform-tools"
 
 
 def main():
@@ -22,6 +25,17 @@ def main():
         app.setQuitOnLastWindowClosed(True)
 
         app.setStyleSheet(LIGHT)
+
+        try:
+            logger.info(f"Using adb at {find_adb()}")
+        except ADBNotFoundError as e:
+            logger.error(str(e))
+            QMessageBox.critical(
+                None,
+                "ADB Not Found",
+                f"{e}\n\nDownload the Platform Tools:\n{ADB_HELP_URL}",
+            )
+            return 1
 
         window = MultiDeviceWindow()
         window.show()

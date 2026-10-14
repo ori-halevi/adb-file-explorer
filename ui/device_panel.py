@@ -253,6 +253,15 @@ class DevicePanel(QWidget):
 
     
 
+    def _report_error(self, message):
+        """Show why an operation failed, not just that it failed."""
+        detail = (self.adb_handler.last_error or "").strip()
+        first_line = detail.splitlines()[0] if detail else ""
+        if len(first_line) > 160:
+            first_line = first_line[:157] + "..."
+        self.status_label.setText(f"{message}: {first_line}" if first_line else message)
+        self.status_label.setToolTip(detail)
+
     def refresh_files(self):
         if self._closing:
             return
@@ -280,7 +289,7 @@ class DevicePanel(QWidget):
                 self.apply_search_filter()
                 self.status_label.setText(f"Found {len(self.all_files)} items")
             else:
-                self.status_label.setText("Failed to list directory")
+                self._report_error("Failed to list directory")
             if self._refresh_pending:
                 self._refresh_pending = False
                 self.refresh_files()
@@ -454,7 +463,7 @@ class DevicePanel(QWidget):
                 self.status_label.setText(f"Pasted {count} item(s)")
                 self.refresh_files()
             else:
-                self.status_label.setText("Paste failed")
+                self._report_error("Paste failed")
 
         self._run_modal(f"Paste {len(self.clipboard['items'])} items", run_paste, on_done=on_paste_done)
 
@@ -575,7 +584,7 @@ class DevicePanel(QWidget):
                 self.status_label.setText(f"Sent {len(items)} item(s) to {target_panel.device_name}")
                 target_panel.refresh_files()
             else:
-                self.status_label.setText("Stream failed")
+                self._report_error("Stream failed")
 
         self._run_modal(f"Streaming to {target_panel.device_name}", run_stream, on_done=on_done)
 
@@ -610,7 +619,7 @@ class DevicePanel(QWidget):
 
         def on_pulled(ok):
             if not ok:
-                self.status_label.setText(f"Failed to open {filename}")
+                self._report_error(f"Failed to open {filename}")
                 return
             try:
                 if sys.platform.startswith('win'):
@@ -651,7 +660,7 @@ class DevicePanel(QWidget):
         self._run_modal(
             title, fn, src, dst,
             on_done=lambda _: self.status_label.setText(success_msg),
-            on_error=lambda: self.status_label.setText(error_msg),
+            on_error=lambda: self._report_error(error_msg),
         )
 
     def rename_item(self, old_name):
@@ -665,7 +674,7 @@ class DevicePanel(QWidget):
                 self.status_label.setText(f"Renamed to '{new_name}'")
                 self.refresh_files()
             else:
-                self.status_label.setText(f"Rename failed")
+                self._report_error("Rename failed")
 
     def delete_item(self, name, is_dir=False):
         if not self.adb_handler.device_connected:
@@ -681,7 +690,7 @@ class DevicePanel(QWidget):
                 self.status_label.setText(f"Deleted '{name}'")
                 self.refresh_files()
             else:
-                self.status_label.setText(f"Delete failed")
+                self._report_error("Delete failed")
 
     def _shortcut_delete(self):
         indexes = self.tree_view.selectionModel().selectedRows()
@@ -741,7 +750,7 @@ class DevicePanel(QWidget):
                 self.status_label.setText(f"Created '{name}'")
                 self.refresh_files()
             else:
-                self.status_label.setText(f"Create failed")
+                self._report_error("Create failed")
 
     def create_new_folder(self):
         if not self.adb_handler.device_connected:
@@ -753,7 +762,7 @@ class DevicePanel(QWidget):
                 self.status_label.setText(f"Created '{name}'")
                 self.refresh_files()
             else:
-                self.status_label.setText(f"Create failed")
+                self._report_error("Create failed")
 
     def upload_file_to_device(self):
         if not self.adb_handler.device_connected:
@@ -765,7 +774,7 @@ class DevicePanel(QWidget):
         remote = f"{self.current_path.rstrip('/')}/{filename}"
         self._run_modal("Uploading", self.adb_handler.push_file, file_path, remote,
                         on_done=lambda _: self.status_label.setText(f"Uploaded {filename}"),
-                        on_error=lambda: self.status_label.setText(f"Failed to upload {filename}"))
+                        on_error=lambda: self._report_error(f"Failed to upload {filename}"))
 
     def upload_files_and_folders(self, files):
         if not self.adb_handler.device_connected:

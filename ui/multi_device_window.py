@@ -157,11 +157,20 @@ class MultiDeviceWindow(QMainWindow):
     
 
     def _initialize_panels(self):
-        initial_devices = ADBHandler().get_unique_devices()
+        handler = ADBHandler()
+        initial_devices = handler.get_unique_devices()
+        # Endpoints adb can see but cannot use yet, e.g. a device still waiting
+        # for its USB-debugging prompt to be accepted.
+        blocked = handler.get_unusable_endpoints()
 
         if not initial_devices:
             self.device_status_label.setText("No devices connected")
-            self.status_label.setText("No ADB devices found. Connect a device and use + Add Panel.")
+            if blocked:
+                self.status_label.setText("; ".join(e.status_text for e in blocked))
+            elif handler.adb_missing:
+                self.status_label.setText("ADB was not found. Install the Android platform-tools.")
+            else:
+                self.status_label.setText("No ADB devices found. Connect a device and use + Add Panel.")
             return
 
         devices_list = list(initial_devices.items())
@@ -175,6 +184,10 @@ class MultiDeviceWindow(QMainWindow):
         if len(devices_list) >= 2:
             serial, model = devices_list[1]
             self._add_panel_for_device(serial, model)
+
+        # Set last so it is not overwritten by the "Added panel" messages.
+        if blocked:
+            self.status_label.setText("; ".join(e.status_text for e in blocked))
 
     def _add_panel_for_device(self, serial, model):
         try:
@@ -199,7 +212,12 @@ class MultiDeviceWindow(QMainWindow):
         handler = ADBHandler()
         devices = handler.get_unique_devices()
         if not devices:
-            QMessageBox.information(self, "No Devices", "No ADB devices connected.")
+            blocked = handler.get_unusable_endpoints()
+            detail = "\n".join(e.status_text for e in blocked)
+            QMessageBox.information(
+                self, "No Devices",
+                f"No usable ADB devices.\n\n{detail}" if detail else "No ADB devices connected.",
+            )
             return
 
         

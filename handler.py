@@ -140,6 +140,10 @@ class ADBHandler:
     # Marker used to split the directory and file halves of a single `find` run.
     _FIND_SEPARATOR = '---adb-explorer-find-split---'
 
+    # Printed by the shell when `ls` fails, for devices whose adb cannot
+    # report an exit code.
+    _LS_FAILED = '---adb-explorer-ls-failed---'
+
     def __init__(self, device_serial=None):
         import logging
         self.logger = logging.getLogger('ADBHandler')
@@ -148,6 +152,7 @@ class ADBHandler:
         self.root_mode = None
         self.last_error = None
         self._active_process = None
+        self._own_streams = set()
         self.endpoints: List[DeviceEndpoint] = []
         self.adb_missing = not adb_available()
 
@@ -194,30 +199,73 @@ class ADBHandler:
     def _failed_result(cmd, message: str) -> subprocess.CompletedProcess:
         return subprocess.CompletedProcess(cmd, 1, '', message)
 
+    @staticmethod
+    def real_errors(stderr: str) -> str:
+        """Drop adb's own chatter from stderr.
+
+        adb prints its daemon-startup and version notices to stderr while
+        exiting 0, so a plain "stderr is not empty" test reports healthy
+        operations as failures.
+        """
+        keep = []
+        for line in (stderr or "").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith('*'):
+                continue
+            lowered = stripped.lower()
+            if lowered.startswith(('adb: warning', 'warning:', 'adb server')):
+                continue
+            if 'daemon not running' in lowered or 'daemon started' in lowered:
+                continue
+            keep.append(stripped)
+        return "\n".join(keep)
+
+    # Windows caps a command line at 32,767 characters, so batches stay well
+    # below that; the device shell has its own limit too.
+    _MAX_COMMAND_CHARS = 8000
+
     def _exec_mkdir(self, serial, remote_dirs):
-        """Create one or many remote directories in a single adb invocation."""
+        """Create remote directories, batched into as few calls as fit."""
         if isinstance(remote_dirs, str):
             remote_dirs = [remote_dirs]
         wanted = [d for d in dict.fromkeys(remote_dirs) if d]
         if not wanted:
             return True
 
-        command = 'mkdir -p ' + ' '.join(shell_quote(d) for d in wanted)
-        try:
-            result = subprocess.run(
-                self._build_adb_cmd(['exec-out', command], device_serial=serial),
-                capture_output=True, timeout=max(15, 2 * len(wanted)),
-                **self._hidden_kwargs(),
-            )
-        except Exception as e:
-            self.logger.warning(f"mkdir -p failed for {wanted}: {e}")
-            return False
+        ok = True
+        for batch in self._chunk_by_length(wanted):
+            command = 'mkdir -p -- ' + ' '.join(shell_quote(d) for d in batch)
+            try:
+                result = subprocess.run(
+                    self._build_adb_cmd(['exec-out', command], device_serial=serial),
+                    capture_output=True, timeout=60,
+                    **self._hidden_kwargs(),
+                )
+            except Exception as e:
+                self.logger.warning(f"mkdir -p failed for {len(batch)} dirs: {e}")
+                ok = False
+                continue
 
-        if result.returncode != 0:
-            error = (result.stderr or b'').decode('utf-8', errors='replace').strip()
-            self.logger.warning(f"mkdir -p failed for {wanted}: {error}")
-            return False
-        return True
+            if result.returncode != 0:
+                error = self.real_errors((result.stderr or b'').decode('utf-8', errors='replace'))
+                if error:
+                    self.logger.warning(f"mkdir -p failed: {error}")
+                    ok = False
+        return ok
+
+    @classmethod
+    def _chunk_by_length(cls, values, overhead: int = 64):
+        """Split values into groups whose quoted length fits one command line."""
+        batch, length = [], overhead
+        for value in values:
+            quoted = len(shell_quote(value)) + 1
+            if batch and length + quoted > cls._MAX_COMMAND_CHARS:
+                yield batch
+                batch, length = [], overhead
+            batch.append(value)
+            length += quoted
+        if batch:
+            yield batch
 
     def _ensure_server_started(self):
         try:
@@ -318,9 +366,6 @@ class ADBHandler:
             self.logger.error(f"ADB Connection error: {e}")
             return False
 
-    def _escape_path(self, path: str) -> str:
-        return shell_quote(path)
-
     def _su_command(self, command: str) -> list:
         """Wrap a shell snippet so `su -c` receives it as a single argument."""
         return ['shell', f'su -c {shell_quote(command)}']
@@ -356,8 +401,9 @@ class ADBHandler:
             self.logger.error(f"Error while {description}: {e}")
             return False
 
-        stderr = (result.stderr or "").strip()
-        # Older adb always exits 0, so treat any stderr output as a failure too.
+        # Older adb always exits 0, so a complaint on stderr also counts as a
+        # failure - but only once adb's own notices have been filtered out.
+        stderr = self.real_errors(result.stderr)
         if result.returncode != 0 or stderr:
             self.last_error = stderr or (result.stdout or "").strip() or f"Failed while {description}"
             self.logger.error(f"Error while {description}: {self.last_error}")
@@ -485,6 +531,7 @@ class ADBHandler:
             self._active_process = src_proc
             stream_id = id(src_proc)
             ADBHandler._active_streams[stream_id] = (src_proc, None)
+            self._own_streams.add(stream_id)
 
             def data_iter():
                 buf = 262144
@@ -506,6 +553,7 @@ class ADBHandler:
                 self.logger.error(f"Stream src stderr: {src_err[:300]}")
 
             ADBHandler._active_streams.pop(stream_id, None)
+            self._own_streams.discard(stream_id)
             self._active_process = None
 
             if not ok:
@@ -524,6 +572,7 @@ class ADBHandler:
         finally:
             if src_proc:
                 ADBHandler._active_streams.pop(id(src_proc), None)
+                self._own_streams.discard(id(src_proc))
                 if src_proc.returncode is None:
                     try: src_proc.kill()
                     except Exception: pass
@@ -531,9 +580,13 @@ class ADBHandler:
 
     def stream_directory(self, src_serial: str, src_path: str, dst_serial: str, dst_path: str,
                          line_callback=None, cancel_check=None) -> bool:
-        parent = '/'.join(dst_path.rstrip('/').split('/')[:-1])
-        base_name = src_path.rstrip('/').split('/')[-1]
-        target = f"{parent}/{base_name}" if parent else base_name
+        """Stream a folder to dst_path on another device.
+
+        dst_path is the full destination path, so a caller can rename the
+        folder on the way (keep-both) or target a subfolder.
+        """
+        target = dst_path.rstrip('/')
+        parent = '/'.join(target.split('/')[:-1])
         src_root = src_path.rstrip('/')
 
         try:
@@ -566,17 +619,20 @@ class ADBHandler:
             # call per transferred file, which dominated the transfer time.
             needed_dirs = [parent] + [remote_dest(d) for d in dirs]
             needed_dirs += ['/'.join(remote_dest(f).rstrip('/').split('/')[:-1]) for f in files]
-            if not self._exec_mkdir(dst_serial, needed_dirs):
-                self.last_error = f"Could not create destination directory under {target}"
-                return False
+            # If the batch mkdir did not fully succeed, fall back to creating
+            # each file's directory as it is streamed rather than giving up.
+            per_file_mkdir = not self._exec_mkdir(dst_serial, needed_dirs)
+            if per_file_mkdir:
+                self.logger.warning("Batched mkdir incomplete; creating directories per file")
 
             for fpath in files:
                 if cancel_check and cancel_check():
+                    self.last_error = "Canceled"
                     return False
                 if line_callback:
                     line_callback(f"Streaming {fpath}")
                 ok = self.stream_file(src_serial, fpath, dst_serial, remote_dest(fpath),
-                                      cancel_check=cancel_check, ensure_dir=False)
+                                      cancel_check=cancel_check, ensure_dir=per_file_mkdir)
                 if not ok:
                     return False
             return True
@@ -584,6 +640,32 @@ class ADBHandler:
             self.logger.error(f"Directory streaming error: {e}")
             self.last_error = str(e)
             return False
+
+    def kill_active(self):
+        """Stop this handler's running adb child, if any.
+
+        Only this handler's processes are touched, so cancelling in one panel
+        cannot abort another panel's transfer.
+        """
+        process = self._active_process
+        if process is not None:
+            try:
+                process.kill()
+            except Exception:
+                pass
+
+        for stream_id in list(self._own_streams):
+            entry = ADBHandler._active_streams.pop(stream_id, None)
+            self._own_streams.discard(stream_id)
+            if not entry:
+                continue
+            for proc in entry:
+                if proc is None:
+                    continue
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
 
     def enable_root(self) -> bool:
         self.last_error = None
@@ -640,10 +722,17 @@ class ADBHandler:
 
         try:
             self.logger.debug(f"Listing directory: {path}")
-            result = self._shell(f'ls -la {shell_quote(path)}', use_root=use_root, timeout=60)
+            # The sentinel matters on the legacy shell protocol, where adb
+            # always exits 0: without it an unreadable directory would look
+            # like an empty one.
+            result = self._shell(
+                f'ls -la {shell_quote(path)} || echo {self._LS_FAILED}',
+                use_root=use_root, timeout=60)
 
             stdout = result.stdout or ""
-            stderr = (result.stderr or "").strip()
+            stderr = self.real_errors(result.stderr)
+            failed_sentinel = self._LS_FAILED in stdout
+            stdout = stdout.replace(self._LS_FAILED, '')
 
             items = []
             links = []
@@ -680,7 +769,7 @@ class ADBHandler:
                 if item.is_link:
                     links.append(item)
 
-            if not items and (result.returncode != 0 or stderr):
+            if not items and (failed_sentinel or result.returncode != 0 or stderr):
                 self.last_error = stderr or stdout.strip() or f"Could not list {path}"
                 self.logger.error(f"ADB Error listing {path}: {self.last_error}")
                 return None
@@ -831,12 +920,18 @@ class ADBHandler:
             f'renaming {old_path}',
         )
 
-    def delete_item(self, path: str, is_dir: bool = False) -> bool:
-        flags = '-rf' if is_dir else '-f'
+    def delete_item(self, path: str, is_dir: bool = False, missing_ok: bool = False) -> bool:
+        """Delete a remote path.
+
+        `missing_ok` adds -f, which also hides an already-missing path, so
+        callers that need proof the path is gone leave it off.
+        """
+        letters = ('r' if is_dir else '') + ('f' if missing_ok else '')
+        flags = f'-{letters} ' if letters else ''
         return self._shell_action(
-            f'rm {flags} -- {shell_quote(path)}',
+            f'rm {flags}-- {shell_quote(path)}',
             f'deleting {path}',
-            timeout=120 if is_dir else 30,
+            timeout=300 if is_dir else 30,
         )
 
     def create_file(self, remote_path: str) -> bool:
@@ -855,21 +950,38 @@ class ADBHandler:
         return self._run_transfer(['push', local_path, remote_path],
                                   f'pushing {os.path.basename(local_path)}')
 
-    def copy_on_device(self, src_path: str, dest_path: str) -> bool:
-        return self._transfer_on_device('cp -r', src_path, dest_path, 'copying')
+    def copy_on_device(self, src_path: str, dest_path: str, ensure_parent: bool = True) -> bool:
+        return self._transfer_on_device('cp -r', src_path, dest_path, 'copying',
+                                        ensure_parent=ensure_parent)
 
-    def move_on_device(self, src_path: str, dest_path: str) -> bool:
-        return self._transfer_on_device('mv', src_path, dest_path, 'moving')
+    def move_on_device(self, src_path: str, dest_path: str, ensure_parent: bool = True) -> bool:
+        return self._transfer_on_device('mv', src_path, dest_path, 'moving',
+                                        ensure_parent=ensure_parent)
 
-    def _transfer_on_device(self, tool: str, src_path: str, dest_path: str, verb: str) -> bool:
+    def _transfer_on_device(self, tool: str, src_path: str, dest_path: str, verb: str,
+                            ensure_parent: bool = True) -> bool:
         parent_dir = '/'.join(dest_path.split('/')[:-1])
-        if parent_dir and not self.create_folder(parent_dir):
+        if ensure_parent and parent_dir and not self.create_folder(parent_dir):
             return False
 
         return self._shell_action(
             f'{tool} -- {shell_quote(src_path)} {shell_quote(dest_path)}',
             f'{verb} {src_path} to {dest_path}',
             timeout=600,
+        )
+
+    def merge_into_folder(self, src_path: str, dest_path: str) -> bool:
+        """Copy a folder's contents into an existing folder.
+
+        `cp -r src dest` would nest the folder inside dest, so the trailing
+        "/." is what merges the contents instead.
+        """
+        if not self.create_folder(dest_path):
+            return False
+        return self._shell_action(
+            f"cp -r -- {shell_quote(src_path.rstrip('/') + '/.')} {shell_quote(dest_path)}",
+            f'merging {src_path} into {dest_path}',
+            timeout=1800,
         )
 
     def path_exists(self, path: str) -> bool:
@@ -882,23 +994,37 @@ class ADBHandler:
             self.logger.error(f"Error checking path existence: {e}")
             return False
 
-    def paths_exist(self, paths: List[str]) -> Dict[str, bool]:
-        """Test many remote paths in one shell call instead of one call each."""
+    def paths_exist(self, paths: List[str]) -> Optional[Dict[str, bool]]:
+        """Test many remote paths in one shell call instead of one call each.
+
+        Returns None when the answer could not be obtained. Callers must treat
+        that as unknown, because reporting "nothing exists" would silently
+        overwrite the destination.
+        """
         if not paths:
             return {}
         wanted = list(dict.fromkeys(paths))
+        answers = []
         try:
-            quoted = ' '.join(shell_quote(p) for p in wanted)
-            command = f'for p in {quoted}; do if [ -e "$p" ]; then echo y; else echo n; fi; done'
-            result = self._shell(command, timeout=60)
-            answers = [l.strip() for l in (result.stdout or "").splitlines() if l.strip()]
-            if len(answers) != len(wanted):
-                self.logger.warning("Unexpected existence-test output; falling back to per-path checks")
-                return {p: self.path_exists(p) for p in wanted}
-            return dict(zip(wanted, [a == 'y' for a in answers]))
+            for batch in self._chunk_by_length(wanted):
+                quoted = ' '.join(shell_quote(p) for p in batch)
+                command = (f'for p in {quoted}; do if [ -e "$p" ]; '
+                           f'then echo y; else echo n; fi; done')
+                result = self._shell(command, timeout=30)
+                replies = [l.strip() for l in (result.stdout or "").splitlines() if l.strip()]
+                if len(replies) != len(batch):
+                    self.logger.warning("Unexpected existence-test output; checking one by one")
+                    return {p: self.path_exists(p) for p in wanted}
+                answers.extend(replies)
+        except subprocess.TimeoutExpired:
+            self.last_error = f"Timed out checking {len(wanted)} path(s)"
+            self.logger.error(self.last_error)
+            return None
         except Exception as e:
+            self.last_error = str(e)
             self.logger.error(f"Error checking paths: {e}")
-            return {p: False for p in wanted}
+            return None
+        return dict(zip(wanted, [a == 'y' for a in answers]))
 
     def push_items(self, local_paths: List[str], remote_dir: str, line_callback=None,
                    sync: bool = False) -> bool:
@@ -928,33 +1054,29 @@ class ADBHandler:
             line_callback=line_callback,
         )
 
-    def disk_usage_many(self, paths: List[str]) -> int:
-        """Total size of several remote paths, measured in one shell call."""
+    def disk_usage_many(self, paths: List[str], timeout: int = 20) -> Optional[int]:
+        """Total size of several remote paths, or None if it cannot be measured.
+
+        None means unknown and must not be read as "small": callers use this to
+        decide whether a transfer is cheap enough to run inline.
+        """
         if not paths:
             return 0
+        total = 0
+        measured = False
         try:
-            quoted = ' '.join(shell_quote(p) for p in paths)
-            result = self._shell(f'du -sk {quoted}', timeout=120)
-            total = 0
-            for line in (result.stdout or "").splitlines():
-                first = line.split()
-                if first and first[0].isdigit():
-                    total += int(first[0]) * 1024
-            return total
+            for batch in self._chunk_by_length(paths):
+                quoted = ' '.join(shell_quote(p) for p in batch)
+                result = self._shell(f'du -sk {quoted}', timeout=timeout)
+                for line in (result.stdout or "").splitlines():
+                    first = line.split()
+                    if first and first[0].isdigit():
+                        total += int(first[0]) * 1024
+                        measured = True
         except Exception as e:
             self.logger.debug(f"du failed for {paths}: {e}")
-            return 0
-
-    def disk_usage(self, path: str) -> Optional[int]:
-        """Total size of a remote file or folder in bytes, or None if unknown."""
-        try:
-            result = self._shell(f'du -sk {shell_quote(path)}', timeout=120)
-            first = (result.stdout or "").strip().split()
-            if first and first[0].isdigit():
-                return int(first[0]) * 1024
-        except Exception as e:
-            self.logger.debug(f"du failed for {path}: {e}")
-        return None
+            return None
+        return total if measured else None
 
     def install_apk(self, apk_path: str) -> bool:
         if not self.device_connected:

@@ -7,8 +7,9 @@ A graphical file manager for Android devices connected via ADB (Android Debug Br
 - **Multi-Panel viewer** - Side-by-side panel view
 - **Full file operations** - Push, pull, delete, rename, duplicate and copy/paste files
 - **Clipboard that spans both worlds** - Copy on the device and paste in Explorer, or the reverse
-- **Conflict handling** - Keep both, overwrite or skip, with apply-to-all
+- **Conflict handling** - Keep both, merge, replace or skip, with apply-to-all
 - **Folder sync** - Re-upload a folder and only the changed files move
+- **Cancellable transfers** - Cancel stops the running adb transfer, not just the dialog
 - **Two-way file transfer** - Transfer files between computer and device easily
 - **Familiar file explorer navigation** - Browse device storage like a desktop file manager
 - **File search** - Quickly find files on your device
@@ -18,9 +19,20 @@ A graphical file manager for Android devices connected via ADB (Android Debug Br
 - **Wireless ADB** - Connect to devices over network (no USB required)
 
 ## Moving files around
-Every transfer works the way it does in a desktop file manager, and all of them
-resolve conflicts the same way: **Keep both** (adds "(2)" to the name),
-**Overwrite** or **Skip**, with an "apply to the rest" option.
+Every transfer works the way it does in a desktop file manager, and all of
+them resolve name clashes through the same dialog:
+
+| Choice | What it does |
+| --- | --- |
+| **Keep both** | Transfers under a free name such as `report (2).pdf`, checked against the whole destination folder |
+| **Merge** (folders) | Adds the new contents to the existing folder and replaces only same-named files |
+| **Replace** | Puts the new item in place first, then removes the old one; for a folder this discards its current contents, which the dialog says explicitly |
+| **Skip** | Leaves the existing item alone |
+
+"Apply this to the remaining items" answers the rest the same way. Nothing at
+the destination is deleted until its replacement is in place, so an
+interrupted replace leaves the original intact. If the destination cannot be
+read, the transfer stops instead of assuming the folder is empty.
 
 **From the PC to the device**
 - Drag files or folders from Explorer/Finder onto a panel
@@ -29,7 +41,10 @@ resolve conflicts the same way: **Keep both** (adds "(2)" to the name),
 - Right-click > Sync Folder - uploads only what changed, so re-running is cheap
 
 **From the device to the PC**
-- Drag items out of a panel onto the desktop, Explorer or any app that takes files
+- Hold `Alt` and drag items out onto the desktop, Explorer or any app that
+  takes files. The files must be fetched before the drag can start, so this is
+  limited to selections under 24 MB and only happens when `Alt` is held - a
+  drag between panels stays instant and costs no adb calls.
 - `Ctrl+Shift+C` puts the selection on the PC clipboard, then paste in Explorer
 - `Ctrl+E` or right-click > Download to PC for a chosen folder (any size)
 - Double-click a file to open it on the PC
@@ -41,16 +56,23 @@ resolve conflicts the same way: **Keep both** (adds "(2)" to the name),
 - Right-click > Copy / Move to Device Folder for a folder picker
 
 **Between two devices**
-- Drag from one panel to another to copy, hold `Shift` while dropping to move
+- Drag from one panel to another to copy, hold `Shift` while dropping to move.
+  Dropping onto a folder row transfers into that folder.
 - Copy in one panel and paste in the other
-- Right-click > Send to Device > Copy/Move to <device>
+- Right-click > Send to Device > Copy/Move to <device>; a move asks first,
+  since it deletes the originals
 
 Files stream directly between devices without being staged on the PC.
+
+Long transfers show the current file and can be cancelled, which stops the
+adb transfer itself. If only some items make it, the status line says how many
+failed and why, rather than reporting success.
 
 ### Keyboard shortcuts
 | Shortcut | Action |
 | --- | --- |
 | `Ctrl+C` / `Ctrl+X` / `Ctrl+V` | Copy / Cut / Paste (device items, or files copied on the PC) |
+| `Alt`+drag | Drag the selection out to the PC |
 | `Ctrl+Shift+C` | Copy the selection to the PC clipboard |
 | `Ctrl+Shift+V` | Paste files from the PC clipboard |
 | `Ctrl+Shift+P` | Copy the full device path as text |
@@ -59,9 +81,18 @@ Files stream directly between devices without being staged on the PC.
 | `F2` / `Del` | Rename / Delete |
 | `F5` / `Backspace` | Refresh / Go up |
 
-Dragging to the PC has to fetch the files before the drag can begin, so it is
-limited to selections under 24 MB; larger ones go through Download to PC. Raise
-the limit with `ADB_EXPLORER_DRAG_LIMIT_MB` if your connection is fast.
+Raise the 24 MB drag-out limit with `ADB_EXPLORER_DRAG_LIMIT_MB` if your
+connection is fast.
+
+### Tests
+`tests/test_transfers.py` exercises these paths against a real connected
+device, including the destructive ones (replace, rollback, cancellation,
+partial failure). It works inside `/sdcard/adbx_cr_tests` and cleans up after
+itself:
+
+```bash
+python tests/test_transfers.py
+```
 
 ## Installation
 ### Option 1: Download Executable (Windows)

@@ -2,25 +2,77 @@
 
 Everything here is mixed into DevicePanel. It is kept separate so the panel
 file stays about the view, and so paste, drag-and-drop, the clipboard and the
-device-to-device sender all share one set of rules:
+device-to-device sender share one set of rules:
 
-* conflicts are always resolved up front, with keep-both / overwrite / skip
-* transfers go through as few adb invocations as possible
-* every long operation reports progress and stays cancellable
+* conflicts are resolved before anything is written (see ui/transfer.py)
+* an existing item is only removed once its replacement is in place
+* every long operation reports progress, can be cancelled, and reports what
+  actually happened - including partial failure
 """
 
 import os
 import time
 
 from PyQt6.QtCore import QObject, pyqtSignal
-from PyQt6.QtWidgets import QFileDialog, QMessageBox
+from PyQt6.QtWidgets import QDialog, QFileDialog, QMessageBox
 
 from ui import transfer
 
 
-class ProgressRelay(QObject):
-    """Carries progress lines from a worker thread to the dialog label."""
+class TransferContext(QObject):
+    """Progress channel and cancel switch shared by a worker and its dialog."""
+
     message = pyqtSignal(str)
+
+    def __init__(self, handlers=()):
+        super().__init__()
+        self.cancelled = False
+        # Handlers whose adb child may be killed on cancel. Only the handlers
+        # taking part in this transfer are listed.
+        self.handlers = [h for h in handlers if h is not None]
+
+    def cancel(self):
+        self.cancelled = True
+        for handler in self.handlers:
+            try:
+                handler.kill_active()
+            except Exception:
+                pass
+
+    def is_cancelled(self):
+        return self.cancelled
+
+    def say(self, text):
+        if not self.cancelled:
+            self.message.emit(text)
+
+
+class TransferOutcome:
+    """What a transfer worker actually managed to do."""
+
+    def __init__(self, total=0):
+        self.total = total
+        self.done = 0
+        self.skipped = 0
+        self.failed = []
+        self.cancelled = False
+        self.error = None
+
+    def record(self, name, ok, error=None):
+        if ok:
+            self.done += 1
+        else:
+            self.failed.append(name)
+            self.error = self.error or error
+
+    @property
+    def partial(self):
+        return bool(self.failed) or (self.done + self.skipped) < self.total
+
+    def __bool__(self):
+        # Falsy only when nothing at all got through, which routes the modal
+        # dialog to its error handler.
+        return self.done > 0
 
 
 class TransferActionsMixin:
@@ -42,15 +94,83 @@ class TransferActionsMixin:
         return names
 
     def _note(self, message):
-        self.status_label.setText(message)
-        self.status_label.setToolTip("")
+        """Set the status line, tolerating a panel that is going away."""
+        if getattr(self, '_closing', False):
+            return
+        try:
+            self.status_label.setText(message)
+            self.status_label.setToolTip("")
+        except RuntimeError:
+            pass
 
     def _note_and_refresh(self, message):
         """Report an outcome that survives the refresh that follows it."""
+        if getattr(self, '_closing', False):
+            return
         self._post_refresh_note = message
-        self.status_label.setText(message)
-        self.status_label.setToolTip("")
-        self.refresh_files()
+        self._note(message)
+        try:
+            self.refresh_files()
+        except RuntimeError:
+            pass
+
+    def _report_outcome(self, outcome, verb, refresh=True):
+        """Say what happened, including when only some items made it."""
+        if outcome.cancelled:
+            message = f"Canceled - {verb.lower()} {outcome.done} of {outcome.total}"
+        elif outcome.partial:
+            detail = outcome.error or self.adb_handler.last_error or "see the log"
+            message = (f"{verb} {outcome.done} of {outcome.total}, "
+                       f"{len(outcome.failed)} failed: {detail.splitlines()[0][:120]}")
+        elif outcome.skipped and not outcome.done:
+            message = "Nothing to do - everything was skipped"
+        else:
+            message = f"{verb} {outcome.done} item(s)"
+        if refresh:
+            self._note_and_refresh(message)
+        else:
+            self._note(message)
+
+    def _confirm(self, title, question):
+        return QMessageBox.question(
+            self, title, question,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        ) == QMessageBox.StandardButton.Yes
+
+    def _connected(self):
+        if self.adb_handler.device_connected:
+            return True
+        self._note("No ADB device")
+        return False
+
+    @staticmethod
+    def _backup_path(path):
+        return f"{path.rstrip('/')}.adbx-replacing-{os.getpid()}"
+
+    def _replace_safely(self, handler, dest_path, is_dir, write):
+        """Put the new item in place before removing the old one.
+
+        The existing item is renamed aside, the replacement is written, and
+        only then is the old copy deleted. If the write fails the old copy is
+        put back, so a replace can never leave the destination empty.
+        """
+        backup = self._backup_path(dest_path)
+        if not handler.rename_item(dest_path, backup):
+            return False, handler.last_error
+
+        ok = False
+        error = None
+        try:
+            ok = write()
+            error = None if ok else handler.last_error
+        finally:
+            if ok:
+                handler.delete_item(backup, is_dir=is_dir, missing_ok=True)
+            else:
+                handler.delete_item(dest_path, is_dir=is_dir, missing_ok=True)
+                handler.rename_item(backup, dest_path)
+        return ok, error
 
     # --------------------------------------------------------- device clipboard
 
@@ -70,21 +190,24 @@ class TransferActionsMixin:
         self._clipboard_time = time.monotonic()
         self._note(f"Cut {len(items)} item(s) - paste into any panel")
 
+    def _clear_clipboard(self):
+        self.clipboard = {'items': [], 'operation': None}
+        self._clipboard_time = 0.0
+
     def _panel_clipboard(self):
         """The most recent device clipboard across all panels.
 
-        Copying in one panel and pasting in another is the obvious expectation,
-        so the clipboard is shared rather than per panel.
+        Copying in one panel and pasting in another is the obvious
+        expectation, so the clipboard is shared rather than per panel.
         """
-        best, best_time, best_panel = self.clipboard, self._clipboard_time, self
-        window = self.window()
-        for panel in getattr(window, 'device_panels', []):
-            if panel is self:
-                continue
-            stamp = getattr(panel, '_clipboard_time', 0)
-            items = getattr(panel, 'clipboard', None) or {}
-            if items.get('items') and stamp > best_time:
-                best, best_time, best_panel = items, stamp, panel
+        best, best_time, best_panel = None, 0.0, self
+        candidates = [self] + [p for p in getattr(self.window(), 'device_panels', [])
+                               if p is not self]
+        for panel in candidates:
+            clip = getattr(panel, 'clipboard', None) or {}
+            stamp = getattr(panel, '_clipboard_time', 0.0)
+            if clip.get('items') and stamp > best_time:
+                best, best_time, best_panel = clip, stamp, panel
         return best, best_time, best_panel
 
     def paste_items(self):
@@ -96,7 +219,7 @@ class TransferActionsMixin:
             self.upload_paths(host_files)
             return
 
-        if not clip or not clip.get('items'):
+        if not clip:
             if host_files:
                 self.upload_paths(host_files)
             else:
@@ -105,17 +228,16 @@ class TransferActionsMixin:
 
         items = clip['items']
         move = clip.get('operation') == 'cut'
+        clear = source_panel._clear_clipboard if move else None
 
-        if source_panel is not self and source_panel.device_serial != self.device_serial:
-            self.receive_items_from(source_panel, items, move=move)
+        if source_panel.device_serial != self.device_serial:
+            source_panel.send_items_to_device(items, self, move=move,
+                                              dest_dir=self._dest_dir(),
+                                              on_success=clear)
             return
 
-        def clear_clipboard():
-            if move:
-                source_panel.clipboard = {'items': [], 'operation': None}
-
         self.move_or_copy_items([i['path'] for i in items], self._dest_dir(),
-                                move=move, on_success=clear_clipboard)
+                                move=move, on_success=clear)
 
     def paste_from_pc(self):
         files = transfer.host_clipboard_files()
@@ -127,27 +249,33 @@ class TransferActionsMixin:
     def copy_to_pc_clipboard(self):
         """Pull the selection to a temp folder and put it on the PC clipboard."""
         names = self._selected_names()
-        if not names:
+        if not names or not self._connected():
             return
 
-        target = transfer.temp_transfer_dir(self.device_serial)
+        target = transfer.temp_transfer_dir(self.device_serial, clear=True)
         remote = [self._remote_path(n) for n in names]
-        relay = ProgressRelay()
+        ctx = TransferContext([self.adb_handler])
 
         def run():
-            return self.adb_handler.pull_items(remote, target, line_callback=relay.message.emit)
+            outcome = TransferOutcome(len(names))
+            ok = self.adb_handler.pull_items(remote, target, line_callback=ctx.say)
+            outcome.done = len(names) if ok else 0
+            if not ok:
+                outcome.failed = list(names)
+                outcome.error = self.adb_handler.last_error
+            outcome.cancelled = ctx.cancelled
+            return outcome
 
-        def on_done(_):
-            local = [os.path.join(target, n) for n in names]
-            local = [p for p in local if os.path.exists(p)]
-            if transfer.set_host_clipboard_files(local):
+        def on_done(outcome):
+            local = [p for p in (os.path.join(target, n) for n in names) if os.path.exists(p)]
+            if local and transfer.set_host_clipboard_files(local):
                 self._note(f"{len(local)} item(s) on the PC clipboard - paste in Explorer")
             else:
-                self._note("Nothing to copy")
+                self._report_outcome(outcome, "Copied", refresh=False)
 
         self._run_modal(f"Copying {len(names)} item(s) to the PC clipboard", run,
-                        on_done=on_done, on_error=lambda: self._report_error("Copy failed"),
-                        relay=relay)
+                        on_done=on_done,
+                        on_error=lambda: self._report_error("Copy failed"), ctx=ctx)
 
     def copy_paths_to_clipboard(self):
         names = self._selected_names()
@@ -159,51 +287,88 @@ class TransferActionsMixin:
 
     def move_or_copy_items(self, paths, dest_dir, move=False, on_success=None):
         """Copy or move items inside one device, resolving conflicts first."""
-        paths = [p for p in paths if p]
-        if not paths:
+        paths = [p for p in dict.fromkeys(p for p in paths if p)]
+        if not paths or not self._connected():
             return
         dest_dir = dest_dir.rstrip('/') or '/'
 
         for path in paths:
-            if dest_dir == path.rstrip('/') or dest_dir.startswith(path.rstrip('/') + '/'):
+            source = path.rstrip('/')
+            if dest_dir == source or dest_dir.startswith(source + '/'):
                 QMessageBox.warning(self, "Invalid Destination",
-                                    "A folder cannot be copied into itself.")
+                                    f"'{source.split('/')[-1]}' cannot be "
+                                    f"{'moved' if move else 'copied'} into itself.")
                 return
 
-        by_name = {p.rstrip('/').split('/')[-1]: p for p in paths}
-        plan, overwrites = transfer.resolve_conflicts(
-            self, self.adb_handler, dest_dir, list(by_name))
+        # Items already sitting in the destination need no dialog: a move is a
+        # no-op and a copy is a duplicate, which is what Keep both means.
+        in_place = [p for p in paths
+                    if '/'.join(p.rstrip('/').split('/')[:-1]) == dest_dir]
+        elsewhere = [p for p in paths if p not in in_place]
+
+        if in_place and move:
+            self._note(f"{len(in_place)} item(s) are already here")
+            if not elsewhere:
+                return
+
+        if in_place and not move:
+            self.duplicate_names([p.rstrip('/').split('/')[-1] for p in in_place])
+            if not elsewhere:
+                return
+
+        sources = {p.rstrip('/').split('/')[-1]: p for p in elsewhere}
+        plan = transfer.plan_transfer(self, self.adb_handler, dest_dir, sources,
+                                      is_dir_of=self._is_dir_of_name)
         if plan is None:
             self._note("Canceled")
             return
         if not plan:
-            self._note("Nothing to do - all items skipped")
+            self._note("Nothing to do - everything was skipped")
             return
 
         verb = "Moving" if move else "Copying"
-        relay = ProgressRelay()
+        ctx = TransferContext([self.adb_handler])
+        handler = self.adb_handler
+        total = len(plan)
+        # The shared parent is created once instead of once per item.
+        handler.create_folder(dest_dir)
 
         def run():
-            done = 0
-            for name, dest_name in plan:
-                src = by_name[name]
-                dst = f"{dest_dir}/{dest_name}"
-                relay.message.emit(f"{verb} {name}")
-                if name in overwrites:
-                    self.adb_handler.delete_item(dst, is_dir=True)
-                ok = (self.adb_handler.move_on_device(src, dst) if move
-                      else self.adb_handler.copy_on_device(src, dst))
-                if ok:
-                    done += 1
-            return done
+            outcome = TransferOutcome(total)
+            for item in plan:
+                if ctx.cancelled:
+                    outcome.cancelled = True
+                    break
+                dst = f"{dest_dir}/{item.dest_name}"
+                ctx.say(f"{verb} {item.name}")
 
-        def on_done(count):
-            if on_success:
+                if item.merging:
+                    ok = handler.merge_into_folder(item.source, dst)
+                    if ok and move:
+                        ok = handler.delete_item(item.source, is_dir=True)
+                    error = None if ok else handler.last_error
+                elif item.replacing:
+                    def write(source=item.source, target=dst):
+                        return (handler.move_on_device(source, target, ensure_parent=False)
+                                if move else
+                                handler.copy_on_device(source, target, ensure_parent=False))
+                    ok, error = self._replace_safely(handler, dst, item.is_dir, write)
+                else:
+                    ok = (handler.move_on_device(item.source, dst, ensure_parent=False)
+                          if move else
+                          handler.copy_on_device(item.source, dst, ensure_parent=False))
+                    error = None if ok else handler.last_error
+
+                outcome.record(item.name, ok, error)
+            return outcome
+
+        def on_done(outcome):
+            if on_success and outcome.done and not outcome.partial:
                 on_success()
-            self._note_and_refresh(f"{'Moved' if move else 'Copied'} {count} item(s)")
+            self._report_outcome(outcome, "Moved" if move else "Copied")
 
-        self._run_modal(f"{verb} {len(plan)} item(s)", run, on_done=on_done,
-                        on_error=lambda: self._report_error(f"{verb} failed"), relay=relay)
+        self._run_modal(f"{verb} {total} item(s)", run, on_done=on_done,
+                        on_error=lambda: self._report_error(f"{verb} failed"), ctx=ctx)
 
     def copy_selected_to(self):
         self._transfer_selected_to_folder(move=False)
@@ -214,98 +379,207 @@ class TransferActionsMixin:
     def _transfer_selected_to_folder(self, move):
         """Copy or move the selection to another folder on the same device."""
         names = self._selected_names()
-        if not names:
+        if not names or not self._connected():
             return
 
         from select_directory_dialog import SelectDirectoryDialog
         dialog = SelectDirectoryDialog(
             self, self.adb_handler, self.current_path, self.root_path, self.use_root)
-        if dialog.exec() != transfer.QDialog.DialogCode.Accepted:
+        if dialog.exec() != QDialog.DialogCode.Accepted:
             return
 
         target = dialog.get_selected_path()
         if not target:
             return
+
+        verb = "Move" if move else "Copy"
+        if not self._confirm(verb, f"{verb} {len(names)} item(s) to '{target}'?"):
+            return
         self.move_or_copy_items([self._remote_path(n) for n in names], target, move=move)
 
     def duplicate_selected(self):
-        """Make a copy beside the original, named like "file (2).txt"."""
-        names = self._selected_names()
-        if not names:
+        self.duplicate_names(self._selected_names())
+
+    def duplicate_names(self, names):
+        """Make a copy beside each original, named like "file (2).txt"."""
+        names = [n for n in names if n]
+        if not names or not self._connected():
             return
 
-        existing = {f.name for f in (self.all_files or [])} | set(names)
+        listing = self.adb_handler.list_directory(self._dest_dir())
+        if listing is None:
+            self._report_error("Could not read this folder")
+            return
+
+        existing = {item.name for item in listing}
+        dir_names = {item.name for item in listing if item.is_dir}
         pairs = []
         for name in names:
             new_name = transfer.unique_name(name, existing)
             existing.add(new_name)
             pairs.append((name, new_name))
 
-        relay = ProgressRelay()
+        ctx = TransferContext([self.adb_handler])
+        handler = self.adb_handler
 
         def run():
-            done = 0
+            outcome = TransferOutcome(len(pairs))
             for name, new_name in pairs:
-                relay.message.emit(f"Duplicating {name}")
-                if self.adb_handler.copy_on_device(self._remote_path(name),
-                                                   self._remote_path(new_name)):
-                    done += 1
-            return done
+                if ctx.cancelled:
+                    outcome.cancelled = True
+                    break
+                ctx.say(f"Duplicating {name}")
+                ok = handler.copy_on_device(self._remote_path(name),
+                                            self._remote_path(new_name),
+                                            ensure_parent=False)
+                outcome.record(name, ok, handler.last_error)
+            return outcome
 
         self._run_modal(f"Duplicating {len(pairs)} item(s)", run,
-                        on_done=lambda count: self._note_and_refresh(f"Duplicated {count} item(s)"),
-                        on_error=lambda: self._report_error("Duplicate failed"), relay=relay)
+                        on_done=lambda outcome: self._report_outcome(outcome, "Duplicated"),
+                        on_error=lambda: self._report_error("Duplicate failed"), ctx=ctx)
+
+    def _is_dir_of_name(self, name):
+        for item in (self.all_files or []):
+            if item.name == name:
+                return item.is_dir
+        return False
 
     # ------------------------------------------------------------ PC to device
 
     def upload_paths(self, local_paths, sync=False):
         """Upload files and folders from the PC into the current folder."""
-        local_paths = [p for p in local_paths if p and os.path.exists(p)]
-        if not local_paths:
-            return
-        if not self.adb_handler.device_connected:
-            self._note("No ADB device")
+        local_paths = [p for p in dict.fromkeys(local_paths) if p and os.path.exists(p)]
+        if not local_paths or not self._connected():
             return
 
         dest_dir = self._dest_dir()
-        by_name = {}
-        for path in local_paths:
-            by_name[os.path.basename(path.rstrip('/' + os.sep))] = path
+        if sync:
+            self._sync_paths(local_paths, dest_dir)
+            return
 
-        plan, overwrites = transfer.resolve_conflicts(
-            self, self.adb_handler, dest_dir, list(by_name))
+        # Two sources can share a basename (two Explorer folders, or a search
+        # result), so each source is planned separately and later ones are
+        # renamed rather than dropped.
+        names = []
+        used = set()
+        for path in local_paths:
+            name = os.path.basename(path.rstrip('/' + os.sep)) or path
+            if name in used:
+                name = transfer.unique_name(name, used)
+            used.add(name)
+            names.append(name)
+
+        sources = dict(zip(names, local_paths))
+        plan = transfer.plan_transfer(
+            self, self.adb_handler, dest_dir, sources,
+            is_dir_of=lambda name: os.path.isdir(sources[name]))
         if plan is None:
             self._note("Upload canceled")
             return
         if not plan:
-            self._note("Nothing to upload - all items skipped")
+            self._note("Nothing to upload - everything was skipped")
             return
 
-        # Items keeping their name go up in one adb push; renamed ones need
-        # their own call because adb can only rename a single source.
-        batch = [by_name[name] for name, dest_name in plan if name == dest_name]
-        renamed = [(by_name[name], dest_name) for name, dest_name in plan if name != dest_name]
-        relay = ProgressRelay()
+        # Only items that keep their own basename can share one adb push,
+        # because a batched push names each file after its source.
+        def keeps_name(item):
+            return item.action is None and item.dest_name == os.path.basename(
+                item.source.rstrip('/' + os.sep))
+
+        batch = [item.source for item in plan if keeps_name(item)]
+        individual = [item for item in plan if not keeps_name(item)]
+        ctx = TransferContext([self.adb_handler])
+        handler = self.adb_handler
+        total = len(plan)
 
         def run():
-            for name in overwrites:
-                self.adb_handler.delete_item(f"{dest_dir}/{name}", is_dir=True)
-
-            ok = True
+            outcome = TransferOutcome(total)
             if batch:
-                relay.message.emit(f"Uploading {len(batch)} item(s)...")
-                ok = self.adb_handler.push_items(batch, dest_dir,
-                                                 line_callback=relay.message.emit, sync=sync)
-            for src, dest_name in renamed:
-                relay.message.emit(f"Uploading {dest_name}")
-                ok = self.adb_handler.push_file(src, f"{dest_dir}/{dest_name}") and ok
-            return ok
+                ctx.say(f"Uploading {len(batch)} item(s)...")
+                ok = handler.push_items(batch, dest_dir, line_callback=ctx.say)
+                error = None if ok else handler.last_error
+                for source in batch:
+                    outcome.record(os.path.basename(source), ok, error)
 
-        def on_done(_):
-            self._note_and_refresh(f"Uploaded {len(plan)} item(s)")
+            for item in individual:
+                if ctx.cancelled:
+                    outcome.cancelled = True
+                    break
+                dst = f"{dest_dir}/{item.dest_name}"
+                ctx.say(f"Uploading {item.dest_name}")
 
-        self._run_modal(f"Uploading {len(plan)} item(s)", run, on_done=on_done,
-                        on_error=lambda: self._report_error("Upload failed"), relay=relay)
+                if item.merging:
+                    # Push the folder's children so what is already there survives.
+                    children = [os.path.join(item.source, c) for c in os.listdir(item.source)]
+                    ok = handler.push_items(children, dst, line_callback=ctx.say) if children \
+                        else handler.create_folder(dst)
+                    error = None if ok else handler.last_error
+                elif item.replacing and item.is_dir:
+                    def write(source=item.source, target=dst):
+                        return handler.push_file(source, target)
+                    ok, error = self._replace_safely(handler, dst, True, write)
+                else:
+                    # adb push overwrites a file in place, so a replace needs
+                    # no delete; keep-both just pushes under the new name.
+                    ok = handler.push_file(item.source, dst)
+                    error = None if ok else handler.last_error
+
+                outcome.record(item.dest_name, ok, error)
+            return outcome
+
+        self._run_modal(f"Uploading {total} item(s)", run,
+                        on_done=lambda outcome: self._report_outcome(outcome, "Uploaded"),
+                        on_error=lambda: self._report_error("Upload failed"), ctx=ctx)
+
+    def _sync_paths(self, local_paths, dest_dir):
+        """Upload only what changed, merging into whatever is already there.
+
+        Sync deliberately skips the conflict dialog: every answer it offers
+        would defeat the point, since the folder existing is the normal case.
+        """
+        # Sync mirrors by name, so two sources with the same name would
+        # overwrite one another silently.
+        seen = {}
+        for source in local_paths:
+            name = os.path.basename(source.rstrip('/' + os.sep)) or source
+            if name in seen:
+                QMessageBox.warning(
+                    self, "Duplicate Name",
+                    f"Two selected items are both named '{name}'. Sync mirrors "
+                    f"by name, so sync them one at a time.")
+                return
+            seen[name] = source
+
+        ctx = TransferContext([self.adb_handler])
+        handler = self.adb_handler
+        total = len(local_paths)
+
+        def run():
+            outcome = TransferOutcome(total)
+            for source in local_paths:
+                if ctx.cancelled:
+                    outcome.cancelled = True
+                    break
+                name = os.path.basename(source.rstrip('/' + os.sep)) or source
+                ctx.say(f"Syncing {name}")
+                target = f"{dest_dir}/{name}"
+                existing = handler.paths_exist([target])
+
+                if os.path.isdir(source) and existing and existing.get(target):
+                    children = [os.path.join(source, c) for c in os.listdir(source)]
+                    ok = handler.push_items(children, target,
+                                            line_callback=ctx.say, sync=True) \
+                        if children else True
+                else:
+                    ok = handler.push_items([source], dest_dir,
+                                            line_callback=ctx.say, sync=True)
+                outcome.record(name, ok, handler.last_error)
+            return outcome
+
+        self._run_modal(f"Syncing {total} item(s)", run,
+                        on_done=lambda outcome: self._report_outcome(outcome, "Synced"),
+                        on_error=lambda: self._report_error("Sync failed"), ctx=ctx)
 
     def upload_file_to_device(self):
         files, _ = QFileDialog.getOpenFileNames(self, "Select Files to Upload")
@@ -323,16 +597,8 @@ class TransferActionsMixin:
         if folder:
             self.upload_paths([folder], sync=True)
 
-    def upload_files_and_folders(self, files):
-        """Kept for callers that pass (path, relative_dir) pairs."""
-        paths = []
-        for entry in files:
-            paths.append(entry[0] if isinstance(entry, (tuple, list)) else entry)
-        self.upload_paths(paths)
-
     def handle_drop_event(self, event):
-        urls = event.mimeData().urls()
-        paths = [u.toLocalFile() for u in urls if u.isLocalFile()]
+        paths = [u.toLocalFile() for u in event.mimeData().urls() if u.isLocalFile()]
         if paths:
             self.upload_paths(paths)
 
@@ -340,7 +606,7 @@ class TransferActionsMixin:
 
     def download_selected_items(self, dest_dir=None):
         names = self._selected_names()
-        if not names:
+        if not names or not self._connected():
             return
 
         if dest_dir is None:
@@ -352,7 +618,8 @@ class TransferActionsMixin:
 
         batch, renamed = [], []
         remembered = None
-        for position, name in enumerate(names):
+        clashes = [n for n in names if os.path.exists(os.path.join(dest_dir, n))]
+        for name in names:
             local = os.path.join(dest_dir, name)
             if not os.path.exists(local):
                 batch.append(name)
@@ -360,55 +627,64 @@ class TransferActionsMixin:
 
             choice = remembered
             if choice is None:
-                dialog = transfer.ConflictDialog(self, name, remaining=len(names) - position - 1)
-                if dialog.exec() != transfer.QDialog.DialogCode.Accepted:
+                remaining = len(clashes) - clashes.index(name) - 1
+                dialog = transfer.ConflictDialog(
+                    self, name, is_dir=os.path.isdir(local),
+                    remaining=remaining, dest_dir=dest_dir)
+                if dialog.exec() != QDialog.DialogCode.Accepted:
                     self._note("Download canceled")
                     return
                 choice = dialog.choice
                 if dialog.apply_to_all.isChecked():
                     remembered = choice
 
-            if choice == transfer.SKIP:
+            if choice in (transfer.SKIP, transfer.CANCEL):
+                if choice == transfer.CANCEL:
+                    self._note("Download canceled")
+                    return
                 continue
             if choice == transfer.KEEP_BOTH:
                 renamed.append((name, transfer.local_unique_path(dest_dir, name)))
             else:
+                # Replace and Merge both let adb pull write over what is there;
+                # pull never deletes local files it is not replacing.
                 batch.append(name)
 
-        if not batch and not renamed:
-            self._note("Nothing to download - all items skipped")
+        total = len(batch) + len(renamed)
+        if not total:
+            self._note("Nothing to download - everything was skipped")
             return
 
-        relay = ProgressRelay()
+        ctx = TransferContext([self.adb_handler])
+        handler = self.adb_handler
 
         def run():
-            ok = True
+            outcome = TransferOutcome(total)
             if batch:
-                ok = self.adb_handler.pull_items(
-                    [self._remote_path(n) for n in batch], dest_dir,
-                    line_callback=relay.message.emit)
+                ok = handler.pull_items([self._remote_path(n) for n in batch],
+                                        dest_dir, line_callback=ctx.say)
+                error = None if ok else handler.last_error
+                for name in batch:
+                    outcome.record(name, ok, error)
             for name, local in renamed:
-                relay.message.emit(f"Downloading {name}")
-                ok = self.adb_handler.pull_file(self._remote_path(name), local) and ok
-            return ok
+                if ctx.cancelled:
+                    outcome.cancelled = True
+                    break
+                ctx.say(f"Downloading {name}")
+                ok = handler.pull_file(self._remote_path(name), local)
+                outcome.record(name, ok, handler.last_error)
+            return outcome
 
-        total = len(batch) + len(renamed)
-
-        def on_done(_):
-            self._note(f"Downloaded {total} item(s) to {dest_dir}")
-
-        self._run_modal(f"Downloading {total} item(s)", run, on_done=on_done,
-                        on_error=lambda: self._report_error("Download failed"), relay=relay)
+        self._run_modal(f"Downloading {total} item(s)", run,
+                        on_done=lambda outcome: self._report_outcome(
+                            outcome, f"Downloaded to {dest_dir} -", refresh=False),
+                        on_error=lambda: self._report_error("Download failed"), ctx=ctx)
 
     def is_dir_for_path(self, path):
-        name = path.rstrip('/').split('/')[-1]
-        for item in (self.all_files or []):
-            if item.name == name:
-                return item.is_dir
-        return False
+        return self._is_dir_of_name(path.rstrip('/').split('/')[-1])
 
     def selection_size(self):
-        """Bytes in the current selection, measuring folders with one du call."""
+        """Bytes in the current selection, or None if a folder cannot be measured."""
         total = 0
         folders = []
         for index in self.tree_view.selectionModel().selectedRows():
@@ -420,98 +696,142 @@ class TransferActionsMixin:
             else:
                 total += self.get_file_size_from_row(index.row())
         if folders:
-            total += self.adb_handler.disk_usage_many(folders)
+            measured = self.adb_handler.disk_usage_many(folders)
+            if measured is None:
+                return None
+            total += measured
         return total
 
     def drag_out_payload(self):
-        """Pull the selection to a temp folder so it can be dropped on the PC.
+        """Fetch the selection so it can be dropped on the PC.
 
-        The files must exist before the drag starts, so only a selection small
-        enough to fetch without a noticeable pause is prepared. Anything larger
-        goes through "Download to PC" or the PC clipboard instead.
+        Called only for an explicit drag-to-PC gesture, because the files have
+        to be on disk before the drag starts and the pull blocks the window.
         """
         names = self._selected_names()
-        if not names:
-            return None
-        if self.selection_size() > transfer.DRAG_OUT_SIZE_LIMIT:
-            self._note("Too large to drag to the PC - use Download to PC (Ctrl+E)")
+        if not names or not self._connected():
             return None
 
-        target = transfer.temp_transfer_dir(self.device_serial)
-        ok = self.adb_handler.pull_items([self._remote_path(n) for n in names], target)
-        if not ok:
+        size = self.selection_size()
+        if size is None:
+            if not self._confirm(
+                    "Unknown Size",
+                    "The size of this selection could not be measured.\n\n"
+                    "Fetching it for the drag may take a while and cannot be "
+                    "cancelled. Continue?"):
+                return None
+        elif size > transfer.DRAG_OUT_SIZE_LIMIT:
+            limit_mb = transfer.DRAG_OUT_SIZE_LIMIT // (1024 * 1024)
+            self._note(f"Selection is larger than {limit_mb} MB - "
+                       f"use Download to PC (Ctrl+E)")
+            return None
+
+        target = transfer.temp_transfer_dir(self.device_serial, clear=True)
+        self._note("Fetching the selection for the drag...")
+        if not self.adb_handler.pull_items([self._remote_path(n) for n in names], target):
             self._report_error("Could not prepare the drag")
             return None
-        return [p for p in (os.path.join(target, n) for n in names) if os.path.exists(p)]
+
+        local = [p for p in (os.path.join(target, n) for n in names) if os.path.exists(p)]
+        self._note(f"Dragging {len(local)} item(s) - drop them anywhere on the PC")
+        return local
+
+    def hint_drag_to_pc(self):
+        """Mention the drag-to-PC gesture once per panel."""
+        if getattr(self, '_drag_hint_shown', False):
+            return
+        self._drag_hint_shown = True
+        self._note("Tip: hold Alt while dragging to drop files on the PC")
 
     # -------------------------------------------------------- device to device
 
-    def receive_items_from(self, source_panel, items, move=False):
-        """Pull items from another panel's device into this one."""
-        source_panel.send_items_to_device(items, self, move=move)
-
-    def send_items_to_device(self, items, target_panel, move=False):
+    def send_items_to_device(self, items, target_panel, move=False, dest_dir=None,
+                             on_success=None):
+        """Stream items to another device, honouring the drop target."""
         if not items:
             return
-        dest_dir = target_panel.current_path.rstrip('/') or '/'
-        by_name = {i['name']: i for i in items}
-        plan, overwrites = transfer.resolve_conflicts(
-            target_panel, target_panel.adb_handler, dest_dir, list(by_name))
+        if not self.adb_handler.device_connected or not target_panel.adb_handler.device_connected:
+            self._note("No ADB device")
+            return
+
+        dest_dir = (dest_dir or target_panel.current_path).rstrip('/') or '/'
+        sources = {i['name']: i for i in items}
+        kinds = {i['name']: i.get('is_dir', False) for i in items}
+        plan = transfer.plan_transfer(target_panel, target_panel.adb_handler, dest_dir,
+                                      sources, is_dir_of=lambda name: kinds.get(name, False))
         if plan is None:
             self._note("Canceled")
             return
         if not plan:
-            self._note("Nothing to send - all items skipped")
+            self._note("Nothing to send - everything was skipped")
             return
 
-        relay = ProgressRelay()
         verb = "Moving" if move else "Sending"
+        ctx = TransferContext([self.adb_handler, target_panel.adb_handler])
+        source_handler = self.adb_handler
+        target_handler = target_panel.adb_handler
+        target_name = target_panel.device_name
+        total = len(plan)
+
+        def stream(item, dest):
+            if item.is_dir:
+                return source_handler.stream_directory(
+                    self.device_serial, item.source['path'],
+                    target_panel.device_serial, dest,
+                    line_callback=ctx.say, cancel_check=ctx.is_cancelled)
+            return source_handler.stream_file(
+                self.device_serial, item.source['path'],
+                target_panel.device_serial, dest,
+                cancel_check=ctx.is_cancelled)
 
         def run():
-            done = 0
-            for name, dest_name in plan:
-                item = by_name[name]
-                dest = f"{dest_dir}/{dest_name}"
-                relay.message.emit(f"{verb} {name}")
-                if name in overwrites:
-                    target_panel.adb_handler.delete_item(dest, is_dir=True)
-                if item['is_dir']:
-                    ok = self.adb_handler.stream_directory(
-                        self.device_serial, item['path'],
-                        target_panel.device_serial, dest,
-                        line_callback=relay.message.emit,
-                    )
+            outcome = TransferOutcome(total)
+            for item in plan:
+                if ctx.cancelled:
+                    outcome.cancelled = True
+                    break
+                dest = f"{dest_dir}/{item.dest_name}"
+                ctx.say(f"{verb} {item.name}")
+
+                if item.replacing:
+                    ok, error = self._replace_safely(
+                        target_handler, dest, item.is_dir,
+                        lambda i=item, d=dest: stream(i, d))
                 else:
-                    ok = self.adb_handler.stream_file(
-                        self.device_serial, item['path'],
-                        target_panel.device_serial, dest,
-                    )
-                if not ok:
-                    return done
-                if move and not self.adb_handler.delete_item(item['path'], is_dir=item['is_dir']):
-                    return done
-                done += 1
-            return done
+                    # Merge and a plain send are the same stream: files with
+                    # the same name are replaced, the rest are left alone.
+                    ok = stream(item, dest)
+                    error = None if ok else source_handler.last_error
 
-        def on_done(count):
-            target_panel._note_and_refresh(
-                f"Received {count} item(s) from {self.device_name}")
-            if move:
-                self._note_and_refresh(f"Moved {count} item(s) to {target_panel.device_name}")
-            else:
-                self._note(f"Sent {count} item(s) to {target_panel.device_name}")
+                if ok and move:
+                    # delete_item without missing_ok fails loudly if the
+                    # source could not actually be removed.
+                    ok = source_handler.delete_item(item.source['path'],
+                                                    is_dir=item.is_dir)
+                    error = None if ok else source_handler.last_error
 
-        self._run_modal(f"{verb} {len(plan)} item(s) to {target_panel.device_name}",
-                        run, on_done=on_done,
-                        on_error=lambda: self._report_error("Transfer failed"), relay=relay)
+                outcome.record(item.name, ok, error)
+                if ctx.cancelled:
+                    outcome.cancelled = True
+                    break
+            return outcome
 
-    # kept for the older call site in the context menu
-    def _send_items_to_device(self, items, target_panel, move=False):
-        self.send_items_to_device(items, target_panel, move=move)
+        def on_done(outcome):
+            if on_success and outcome.done and not outcome.partial:
+                on_success()
+            try:
+                if not getattr(target_panel, '_closing', False):
+                    target_panel._note_and_refresh(
+                        f"Received {outcome.done} item(s) from {self.device_name}")
+            except RuntimeError:
+                pass
+            self._report_outcome(outcome, "Moved" if move else "Sent", refresh=move)
+
+        self._run_modal(f"{verb} {total} item(s) to {target_name}", run, on_done=on_done,
+                        on_error=lambda: self._report_error("Transfer failed"), ctx=ctx)
 
     def _other_panels(self):
-        window = self.window()
-        return [p for p in getattr(window, 'device_panels', [])
+        return [p for p in getattr(self.window(), 'device_panels', [])
                 if p is not self and p.adb_handler.device_connected]
 
     def _populate_send_to_menu(self, menu, indexes, position):
@@ -533,4 +853,10 @@ class TransferActionsMixin:
         for panel in targets:
             action = menu.addAction(f"Move to {panel.device_name}")
             action.triggered.connect(
-                lambda checked=False, p=panel, its=items: self.send_items_to_device(its, p, move=True))
+                lambda checked=False, p=panel, its=items: self._confirm_move_to(its, p))
+
+    def _confirm_move_to(self, items, panel):
+        if self._confirm("Move to Device",
+                         f"Move {len(items)} item(s) to {panel.device_name}?\n\n"
+                         f"They will be deleted from {self.device_name} afterwards."):
+            self.send_items_to_device(items, panel, move=True)

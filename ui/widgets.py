@@ -9,10 +9,10 @@ ADB_MIME = "application/x-adb-paths"
 class DropTreeView(QTreeView):
     """File view with drag-and-drop in every familiar direction.
 
-    * drop files from the PC   -> upload here
-    * drag items out to the PC -> download wherever they are dropped
-    * drag between panels      -> copy, or move while holding Shift
-    * drag inside one panel    -> move, or copy while holding Ctrl
+    * drop files from the PC    -> upload here
+    * Alt-drag items out        -> drop them on the PC
+    * drag between panels       -> copy, or move while holding Shift
+    * drag inside one panel     -> move, or copy while holding Ctrl
     """
 
     def __init__(self, parent_widget, main_window):
@@ -67,7 +67,9 @@ class DropTreeView(QTreeView):
 
             src_serial, paths = lines[0], lines[1:]
             dest = self._get_drop_destination(event)
-            modifiers = QGuiApplication.keyboardModifiers()
+            # The event carries the modifiers held at drop time; a global
+            # snapshot can be stale and would turn a Ctrl-copy into a move.
+            modifiers = event.modifiers()
             my_serial = self._get_device_serial()
 
             if src_serial != my_serial and my_serial:
@@ -105,11 +107,14 @@ class DropTreeView(QTreeView):
                 'path': p,
                 'is_dir': panel.is_dir_for_path(p),
             } for p in paths]
-            panel.send_items_to_device(items, self.main_window, move=move)
+            # dest_path is the row the items were dropped on, which may be a
+            # subfolder rather than the panel's current directory.
+            panel.send_items_to_device(items, self.main_window, move=move,
+                                       dest_dir=dest_path)
             return
 
         if hasattr(self.main_window, 'cross_device_drop'):
-            self.main_window.cross_device_drop.emit(src_serial, paths, dest_path)
+            self.main_window.cross_device_drop.emit(src_serial, paths, dest_path, move)
             return
 
         QMessageBox.warning(self, "Cross-Device Drop",
@@ -142,13 +147,16 @@ class DropTreeView(QTreeView):
         md = QMimeData()
         md.setData(ADB_MIME, "\n".join([serial] + paths).encode("utf-8"))
 
-        # Attaching real file URLs is what lets the selection be dropped on the
-        # desktop or in Explorer. The files have to exist before the drag
-        # starts, so the panel only fetches a selection small enough to pull
-        # without a noticeable pause.
-        local_paths = self.main_window.drag_out_payload()
-        if local_paths:
-            md.setUrls([QUrl.fromLocalFile(p) for p in local_paths])
+        # Real file URLs are what let a selection be dropped on the desktop or
+        # in Explorer, but they only exist once the files have been pulled, and
+        # that pull blocks the window. So it happens only for an explicit
+        # Alt-drag; a drag between panels stays instant and costs no adb calls.
+        if QGuiApplication.keyboardModifiers() & Qt.KeyboardModifier.AltModifier:
+            local_paths = self.main_window.drag_out_payload()
+            if local_paths:
+                md.setUrls([QUrl.fromLocalFile(p) for p in local_paths])
+        else:
+            self.main_window.hint_drag_to_pc()
 
         drag = QDrag(self)
         drag.setMimeData(md)

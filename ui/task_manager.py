@@ -16,6 +16,13 @@ class WorkerThread(QThread):
         self._kwargs = kwargs
         self._result = None
         self._error_message = None
+        self._cancelled = False
+        # Objects with a kill_active() method that this task may stop. Only
+        # what this task started is ever killed.
+        self.cancel_targets = []
+
+    def is_cancelled(self):
+        return self._cancelled
 
     def run(self):
         try:
@@ -34,26 +41,26 @@ class WorkerThread(QThread):
         return self._error_message
 
     def cancel(self):
+        """Ask the work to stop, and stop the adb children it started.
+
+        Earlier this killed and cleared the process-wide stream registry,
+        which aborted transfers running in other panels.
+        """
+        self._cancelled = True
         self.requestInterruption()
-        
+
+        targets = list(self.cancel_targets)
         fn_self = getattr(self._fn, '__self__', None)
-        if fn_self and hasattr(fn_self, '_active_process'):
-            proc = fn_self._active_process
-            if proc:
+        if fn_self is not None:
+            targets.append(fn_self)
+
+        for target in targets:
+            killer = getattr(target, 'kill_active', None)
+            if callable(killer):
                 try:
-                    proc.kill()
-                    return
+                    killer()
                 except Exception:
                     pass
-
-        
-        from handler import ADBHandler
-        for stream_id, (src, dst) in list(ADBHandler._active_streams.items()):
-            try: src.kill()
-            except Exception: pass
-            try: dst.kill()
-            except Exception: pass
-        ADBHandler._active_streams.clear()
 
 
 class TaskRow(QFrame):

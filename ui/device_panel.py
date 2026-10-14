@@ -60,7 +60,8 @@ class PathInput(QLineEdit):
 
 class DevicePanel(TransferActionsMixin, QWidget):
 
-    cross_device_drop = pyqtSignal(str, list, str)
+    # src_serial, remote paths, destination dir, move instead of copy
+    cross_device_drop = pyqtSignal(str, list, str, bool)
     close_requested = pyqtSignal()
 
     def __init__(self, parent, adb_handler, device_info=None):
@@ -75,6 +76,9 @@ class DevicePanel(TransferActionsMixin, QWidget):
         self._host_clipboard_time = 0.0
         self._last_download_dir = None
         self._post_refresh_note = None
+        self._drag_hint_shown = False
+        # Transfer workers that must finish before the panel may be deleted.
+        self._transfer_tasks = set()
         QGuiApplication.clipboard().dataChanged.connect(self._on_host_clipboard_changed)
 
         
@@ -338,7 +342,12 @@ class DevicePanel(TransferActionsMixin, QWidget):
         task.start()
 
     def prepare_for_close(self):
-        """Keep the panel alive until its refresh worker has stopped."""
+        """Keep the panel alive until its workers have stopped.
+
+        A transfer worker still holds this panel's widgets, and a queued
+        progress signal arriving after deletion would abort the process, so
+        every task is cancelled and waited for before deleteLater().
+        """
         if self._closing:
             return
 
@@ -346,11 +355,31 @@ class DevicePanel(TransferActionsMixin, QWidget):
         self._refresh_pending = False
         self.hide()
 
-        task = self._refresh_task
-        if task is not None and task.isRunning():
-            task.finished.connect(self.deleteLater)
-        else:
+        pending = [t for t in self._transfer_tasks if t is not None and t.isRunning()]
+        for task in pending:
+            try:
+                task.cancel()
+            except Exception:
+                pass
+
+        if self._refresh_task is not None and self._refresh_task.isRunning():
+            pending.append(self._refresh_task)
+
+        if not pending:
             self.deleteLater()
+            return
+
+        remaining = set(pending)
+
+        def one_finished(task=None):
+            for candidate in list(remaining):
+                if not candidate.isRunning():
+                    remaining.discard(candidate)
+            if not remaining:
+                self.deleteLater()
+
+        for task in pending:
+            task.finished.connect(one_finished)
 
 
     def apply_search_filter(self):
@@ -426,6 +455,9 @@ class DevicePanel(TransferActionsMixin, QWidget):
         for index in self.tree_view.selectionModel().selectedRows():
             name = self.tree_model.itemFromIndex(index.siblingAtColumn(0)).text()
             item_type = self.tree_model.itemFromIndex(index.siblingAtColumn(1)).text()
+            if not name or name == "..":
+                # The parent row is navigation, not an item to act on.
+                continue
             selected_items.append({
                 'name': name,
                 'path': f"{self.current_path.rstrip('/')}/{name}",
@@ -740,23 +772,28 @@ class DevicePanel(TransferActionsMixin, QWidget):
 
 
     def _run_modal(self, title, fn, *args, on_done=None, on_error=None, refresh=False,
-                   relay=None):
+                   ctx=None):
+        """Run work in a thread behind a cancellable progress dialog.
+
+        `ctx` is a TransferContext: its progress lines drive the label and the
+        Cancel button both flips its flag and kills the adb child, so Cancel
+        actually stops the transfer instead of only hiding the dialog.
+        """
         task = WorkerThread(title, fn, *args)
+        if ctx is not None:
+            task.cancel_targets = list(getattr(ctx, 'handlers', []))
+        self._transfer_tasks.add(task)
 
         dlg = QDialog(self)
         dlg.setWindowTitle(title)
         dlg.setWindowModality(Qt.WindowModality.WindowModal)
-        dlg.setFixedSize(360, 130)
+        dlg.setFixedSize(420, 140)
         layout = QVBoxLayout(dlg)
         layout.setContentsMargins(16, 16, 16, 16)
 
         label = QLabel(f"{title}...")
         label.setWordWrap(True)
         layout.addWidget(label)
-
-        if relay is not None:
-            # Worker threads emit progress lines; Qt queues them onto the GUI thread.
-            relay.message.connect(lambda text: label.setText(text[-120:]))
 
         bar = QProgressBar()
         bar.setRange(0, 0)
@@ -768,34 +805,64 @@ class DevicePanel(TransferActionsMixin, QWidget):
         btn_row.addWidget(cancel_btn)
         layout.addLayout(btn_row)
 
-        sent_to_background = [False]
-        completed = [False]
-        failed = [False]
+        finished = [False]
+
+        if ctx is not None:
+            def show_progress(text):
+                # Queued from the worker thread, so the label may already be
+                # gone by the time this runs.
+                if finished[0]:
+                    return
+                try:
+                    label.setText(text[-160:])
+                except RuntimeError:
+                    pass
+
+            ctx.message.connect(show_progress)
 
         def cancel_task():
+            cancel_btn.setEnabled(False)
+            label.setText("Canceling...")
+            if ctx is not None:
+                ctx.cancel()
             task.cancel()
-            dlg.close()
 
         cancel_btn.clicked.connect(cancel_task)
 
-        def handle_finished(val):
-            completed[0] = True
-            if dlg.isVisible():
+        def cleanup():
+            finished[0] = True
+            if ctx is not None:
+                try:
+                    ctx.message.disconnect(show_progress)
+                except (TypeError, RuntimeError):
+                    pass
+            self._transfer_tasks.discard(task)
+            try:
                 dlg.close()
-            is_ok = bool(val) if val is not None else False
-            if is_ok:
+                dlg.deleteLater()
+            except RuntimeError:
+                pass
+
+        def handle_finished(val):
+            cleanup()
+            if self._closing:
+                return
+            cancelled = bool(ctx is not None and ctx.cancelled) or task.is_cancelled()
+            if cancelled and not getattr(val, 'done', 0):
+                self._note("Canceled")
+                return
+            if bool(val) if val is not None else False:
                 if on_done:
                     on_done(val)
                 if refresh:
                     self.refresh_files()
-            else:
-                if on_error:
-                    on_error()
+            elif on_error:
+                on_error()
 
         def handle_error(msg):
-            failed[0] = True
-            if dlg.isVisible():
-                dlg.close()
+            cleanup()
+            if self._closing:
+                return
             if on_error:
                 on_error()
 
@@ -805,25 +872,4 @@ class DevicePanel(TransferActionsMixin, QWidget):
         task.start()
         return task
 
-    def _run_background(self, name, fn, *args, on_done=None, on_error=None, refresh=False):
-        parent_window = self.window()
-        if hasattr(parent_window, 'task_manager'):
-            task = parent_window.task_manager.submit(name, fn, *args)
-        else:
-            task = WorkerThread(name, fn, *args)
-            task.start()
 
-        def handle_result(val):
-            is_ok = bool(val) if val is not None else False
-            if is_ok:
-                if on_done:
-                    on_done(val)
-                if refresh:
-                    self.refresh_files()
-            else:
-                if on_error:
-                    on_error()
-
-        task.finished_signal.connect(handle_result)
-        task.error_signal.connect(lambda msg: (on_error() if on_error else None))
-        return task

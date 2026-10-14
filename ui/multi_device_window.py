@@ -1,7 +1,6 @@
 import os
 import sys
 from pathlib import Path
-import subprocess
 import configparser
 
 from PyQt6.QtWidgets import (
@@ -252,7 +251,7 @@ class MultiDeviceWindow(QMainWindow):
 
     
 
-    def _on_cross_device_drop(self, src_serial, paths, dest_path):
+    def _on_cross_device_drop(self, src_serial, paths, dest_path, move=False):
         
         dest_panel = self.sender()
         if not isinstance(dest_panel, DevicePanel):
@@ -269,16 +268,16 @@ class MultiDeviceWindow(QMainWindow):
             self.status_label.setText("Source device panel not found")
             return
 
-        self._stream_items(src_panel, dest_panel, paths)
+        self._stream_items(src_panel, dest_panel, paths, dest_path, move)
 
-    def _stream_items(self, src_panel, dest_panel, paths):
+    def _stream_items(self, src_panel, dest_panel, paths, dest_dir=None, move=False):
         """Hand a cross-device drop to the panel's shared transfer logic."""
         items = [{
             'name': path.rstrip('/').split('/')[-1],
             'path': path,
             'is_dir': src_panel.is_dir_for_path(path),
         } for path in paths]
-        src_panel.send_items_to_device(items, dest_panel)
+        src_panel.send_items_to_device(items, dest_panel, move=move, dest_dir=dest_dir)
 
     def _target_panel(self):
         for p in self.device_panels:

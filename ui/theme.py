@@ -13,9 +13,27 @@ DEFAULT_DARK = True
 
 
 def config_path():
-    base = (Path(sys.executable).parent if getattr(sys, 'frozen', False)
-            else Path(os.path.abspath(__file__)).parent)
-    return base / "config.ini"
+    """Where the theme choice is kept.
+
+    Beside the program, which keeps a portable copy self-contained, unless
+    that folder cannot be written to - an install under Program Files, say -
+    in which case the user's own data folder is used instead.
+    """
+    beside = (Path(sys.executable).parent if getattr(sys, 'frozen', False)
+              else Path(os.path.abspath(__file__)).parent)
+    if os.access(beside, os.W_OK):
+        return beside / "config.ini"
+
+    if os.name == 'nt':
+        base = Path(os.environ.get('LOCALAPPDATA') or Path.home())
+    else:
+        base = Path(os.environ.get('XDG_CONFIG_HOME') or (Path.home() / '.config'))
+    folder = base / "adb_explorer"
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return beside / "config.ini"
+    return folder / "config.ini"
 
 
 def load_dark():

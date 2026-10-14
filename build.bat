@@ -4,7 +4,6 @@ setlocal
 echo [1/5] Cleaning up previous builds...
 if exist "build" rmdir /s /q "build"
 if exist "dist" rmdir /s /q "dist"
-if exist "ADB Explorer.spec" del "ADB Explorer.spec"
 
 :: Create a clean Python environment
 python -m venv venv
@@ -16,20 +15,9 @@ pip install -r requirements.txt
 pip install pyinstaller
 
 echo [3/5] Building ADB Explorer...
-pyinstaller ^
-    --noconfirm ^
-    --onefile ^
-    --windowed ^
-    --name "ADB Explorer" ^
-    --add-data "logging_config.py;." ^
-    --hidden-import="PyQt6.QtWidgets" ^
-    --hidden-import="PyQt6.QtCore" ^
-    --hidden-import="PyQt6.QtGui" ^
-    --hidden-import="logging.handlers" ^
-    --clean ^
-    --noconsole ^
-    --log-level=ERROR ^
-    main.py
+:: "ADB Explorer.spec" is the single description of the build, so the local
+:: build and the release workflow cannot drift apart.
+pyinstaller --noconfirm --clean --log-level=ERROR "ADB Explorer.spec"
 
 if %ERRORLEVEL% NEQ 0 (
     echo Build failed with error %ERRORLEVEL%

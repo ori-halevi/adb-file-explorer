@@ -6,7 +6,7 @@ A graphical file manager for Android devices connected via ADB (Android Debug Br
 - **Device-to-device transfers** - Copy files from one android device to another efficiently
 - **Multi-Panel viewer** - Side-by-side panel view
 - **Eight view modes** - Icons in four sizes, List, Details, Tiles and Content, with Ctrl+wheel zoom
-- **Thumbnails** - Photos and (with ffmpeg) video frames, fetched cheaply and cached
+- **Thumbnails** - Photos and video frames, fetched cheaply, cached, and needing nothing installed
 - **Full file operations** - Push, pull, delete, rename, duplicate and copy/paste files
 - **Clipboard that spans both worlds** - Copy on the device and paste in Explorer, or the reverse
 - **Conflict handling** - Keep both, merge, replace or skip, with apply-to-all
@@ -36,12 +36,14 @@ and only for the rows actually on screen:
   tenth of a second, and the EXIF rotation is applied so portrait photos are
   upright.
 - **PNG, WebP, GIF, BMP** - fetched whole, but only below 2 MB.
-- **Video** - needs `ffmpeg` on the PC (on `PATH` or in `FFMPEG_PATH`).
-  Instead of pulling a whole clip, the head is read, and the tail too if the
-  index lives at the end; they are written into a sparse local file at their
-  real offsets so ffmpeg can decode one frame. A 9.6 MB clip usually costs
-  1.5 MB. Without ffmpeg, videos simply get a file icon and the menu entry
-  says so.
+- **Video** - decoded by Qt's multimedia backend, which ships inside PyQt6
+  and therefore inside the packaged app: nothing has to be installed and
+  nothing is downloaded. Instead of pulling a whole clip, the head is read,
+  and the tail too if the index lives at the end; they are written into a
+  sparse local file at their real offsets so a decoder can find one frame. A
+  9.6 MB clip usually costs 1.5 MB and about a third of a second. If an
+  `ffmpeg` happens to be on `PATH` (or in `FFMPEG_PATH`) it is used instead,
+  purely because it can run on a worker thread, but it is never required.
 
 Thumbnails are cached on disk under `%LOCALAPPDATA%\adb_explorer\thumbnails`
 (`~/.cache/adb_explorer` elsewhere), keyed by path, size and timestamp, so a
@@ -198,8 +200,18 @@ sudo apt-get install adb  # Ubuntu/Debian
 ## Technical Details
 Built with:
 - **Python** - Core application logic
-- **PyQt6** - GUI framework
+- **PyQt6** - GUI framework, including the Qt multimedia backend used for
+  video thumbnails
 - **ADB** - Android Debug Bridge for device communication
+
+### Building the executable
+`ADB Explorer.spec` is the single description of the build; `build.bat` and
+the release workflow both run it, so they cannot drift apart.
+
+```bash
+pip install -r requirements.txt pyinstaller
+pyinstaller --noconfirm --clean "ADB Explorer.spec"
+```
 The application uses subprocess calls to ADB commands and presents them through a familiar file explorer interface, making Android file management accessible without command-line knowledge.
 ## Known Limitations
 - Some system directories may require root access

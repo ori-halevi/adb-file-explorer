@@ -270,12 +270,17 @@ class DevicePanel(TransferActionsMixin, QWidget):
         self._video_thumb_action = menu.addAction("Video thumbnails")
         self._video_thumb_action.setCheckable(True)
         self._video_thumb_action.setChecked(self._video_thumbnails_wanted())
-        if not thumbnails.find_ffmpeg():
+        backend = thumbnails.video_backend()
+        if backend is None:
             self._video_thumb_action.setEnabled(False)
-            self._video_thumb_action.setText("Video thumbnails (needs ffmpeg)")
+            self._video_thumb_action.setText("Video thumbnails (no decoder)")
             self._video_thumb_action.setToolTip(
-                "Install ffmpeg and put it on PATH, or set FFMPEG_PATH, to get "
-                "a frame from each video")
+                "This build has no multimedia support; put ffmpeg on PATH to "
+                "get a frame from each video")
+        else:
+            self._video_thumb_action.setToolTip(
+                "A frame from each video, decoded by "
+                + ("ffmpeg" if backend == 'ffmpeg' else "Qt, which ships with the app"))
         self._video_thumb_action.toggled.connect(self._set_video_thumbnails)
 
         self._small_thumb_action = menu.addAction("Thumbnails in List and Details")
@@ -298,7 +303,7 @@ class DevicePanel(TransferActionsMixin, QWidget):
         return QSettings("ADB Explorer", "ADB Explorer")
 
     def _video_thumbnails_wanted(self):
-        if not thumbnails.find_ffmpeg():
+        if thumbnails.video_backend() is None:
             return False
         return self._settings().value("video_thumbnails", True, type=bool)
 

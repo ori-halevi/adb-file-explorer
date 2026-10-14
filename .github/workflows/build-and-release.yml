@@ -31,8 +31,10 @@ jobs:
           pip install pyinstaller
 
       - name: Build EXE with PyInstaller
+        # The spec file is the single description of the build, so this cannot
+        # drift away from build.bat.
         run: |
-          pyinstaller --noconfirm --onefile --windowed --name "ADB Explorer" --hidden-import="PyQt6.QtWidgets" --hidden-import="PyQt6.QtCore" --hidden-import="PyQt6.QtGui" --hidden-import="logging.handlers" --clean --noconsole --log-level=ERROR main.py
+          pyinstaller --noconfirm --clean --log-level=ERROR "ADB Explorer.spec"
 
       - name: Upload EXE as build artifact
         uses: actions/upload-artifact@v4

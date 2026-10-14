@@ -158,13 +158,35 @@ started = time.time()
 hit = fresh.cached(key)
 check("a new session reads it from disk", hit is not None and time.time() - started < 0.5)
 
-print("\n=== 6. video thumbnails degrade without ffmpeg ===")
-has_ffmpeg = bool(thumbnails.find_ffmpeg())
-check("video support follows ffmpeg",
-      thumbnails.can_thumbnail("clip.mp4", False) == has_ffmpeg,
-      f"ffmpeg={'found' if has_ffmpeg else 'missing'}")
-check("the menu entry reflects that",
-      panel._video_thumb_action.isEnabled() == has_ffmpeg)
+print("\n=== 6. video thumbnails need nothing installed ===")
+backend = thumbnails.video_backend()
+check("a video decoder is available out of the box", backend is not None, str(backend))
+check("Qt's multimedia backend is present", thumbnails.QT_VIDEO is True)
+check("videos can be thumbnailed", thumbnails.can_thumbnail("clip.mp4", False) is True)
+check("the menu entry is enabled", panel._video_thumb_action.isEnabled() is True)
+
+device_videos = [f for f in (h.list_directory("/sdcard/DCIM/Camera") or [])
+                 if f.name.lower().endswith('.mp4') and f.size > 1_000_000][:1]
+if device_videos:
+    clip = device_videos[0]
+    cache2 = thumbnails.ThumbnailCache()
+    item2 = {'name': clip.name, 'path': clip.path, 'size': clip.size,
+             'modified': clip.date_modified}
+    frames = {}
+    cache2.ready.connect(lambda k, p: frames.update({k: p}))
+    started = time.time()
+    immediate = cache2.request(h.device_serial, item2, 96)
+    pump(40, until=lambda: bool(frames) or immediate is not None)
+    pixmap = immediate or (list(frames.values())[0] if frames else None)
+    check("a frame was decoded from a real video",
+          pixmap is not None and not pixmap.isNull(),
+          f"{time.time() - started:.1f}s, backend={backend}")
+    if pixmap:
+        check("the frame is a picture, not a placeholder",
+              pixmap.width() > 8 and pixmap.height() > 8,
+              f"{pixmap.width()}x{pixmap.height()}")
+else:
+    print("  (no video on the device to decode)")
 
 print("\n=== 7. the MP4 index check that keeps video cheap ===")
 # an ftyp box of exactly 32 bytes, followed by a complete 16-byte moov

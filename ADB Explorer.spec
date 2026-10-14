@@ -5,8 +5,14 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[],
-    hiddenimports=['PyQt6.QtWidgets', 'PyQt6.QtCore', 'PyQt6.QtGui', 'logging.handlers'],
+    datas=[('logging_config.py', '.')],
+    hiddenimports=[
+        'PyQt6.QtWidgets', 'PyQt6.QtCore', 'PyQt6.QtGui',
+        # Qt's multimedia backend is what decodes a frame out of a video, so
+        # thumbnails work with nothing installed on the user's machine.
+        'PyQt6.QtMultimedia',
+        'logging.handlers',
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

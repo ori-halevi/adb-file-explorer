@@ -7,9 +7,12 @@ each kind of file is handled by the cheapest route that works:
   thumbnail that cameras embed in the EXIF block (typically 512 px for a 2.5 MB
   photo, fetched in about a tenth of a second).
 * other images - fetched in full, but only below a size limit.
-* video - needs ffmpeg on the PC. Rather than fetching a whole clip, the head
-  and tail are read and written into a sparse local file at their real offsets,
-  so ffmpeg can find the index at the end and decode a frame from the start.
+* video - decoded by Qt's own multimedia backend, which ships with PyQt6, so
+  nothing has to be installed. Rather than fetching a whole clip, the head is
+  read, and the tail as well when the index lives at the end, and both are
+  written into a sparse local file at their real offsets. An external ffmpeg
+  is used instead when one is on the PATH, which keeps the work off the GUI
+  thread, but it is never required.
 
 Results are cached in memory and on disk, keyed by path, size and timestamp,
 so a folder costs nothing to revisit.
@@ -22,8 +25,14 @@ import struct
 import subprocess
 import tempfile
 
-from PyQt6.QtCore import Qt, QObject, QRunnable, QThreadPool, pyqtSignal
+from PyQt6.QtCore import Qt, QObject, QRunnable, QThreadPool, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QImage, QPixmap, QTransform
+
+try:
+    from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
+    QT_VIDEO = True
+except ImportError:          # a PyQt6 build without the multimedia module
+    QT_VIDEO = False
 
 from handler import ADBHandler, find_adb, shell_quote
 
@@ -78,13 +87,27 @@ def find_ffmpeg(refresh=False):
     return _ffmpeg
 
 
+def video_backend():
+    """How video frames can be decoded on this machine.
+
+    Qt's multimedia backend comes with PyQt6, so video thumbnails work out of
+    the box; an external ffmpeg is preferred when present only because it can
+    run entirely on a worker thread.
+    """
+    if find_ffmpeg():
+        return 'ffmpeg'
+    if QT_VIDEO:
+        return 'qt'
+    return None
+
+
 def can_thumbnail(name, is_dir, videos_enabled=True):
     if is_dir:
         return False
     ext = os.path.splitext(name)[1].lower()
     if ext in IMAGE_EXTS:
         return True
-    return ext in VIDEO_EXTS and videos_enabled and bool(find_ffmpeg())
+    return ext in VIDEO_EXTS and videos_enabled and video_backend() is not None
 
 
 def cache_dir():
@@ -336,6 +359,122 @@ def _run_ffmpeg(ffmpeg, clip, out, px):
     return None
 
 
+def fetch_video_locally(serial, path, size, target_dir):
+    """Put enough of a remote clip on disk for a decoder to find a frame.
+
+    Returns the local path, or None. Only the head is fetched when the index
+    is already in it, which is the usual case for phone video.
+    """
+    local = os.path.join(target_dir, 'clip' + (os.path.splitext(path)[1].lower() or '.mp4'))
+
+    if size and size <= MAX_FULL_VIDEO_BYTES:
+        data = _adb_exec(serial, f'cat {shell_quote(path)}', timeout=120)
+        if not data:
+            return None
+        with open(local, 'wb') as handle:
+            handle.write(data)
+        return local
+
+    head = _read_range(serial, path, 0, VIDEO_FIRST_TRY_BYTES, timeout=60)
+    if not head:
+        return None
+    if has_moov(head):
+        _write_sparse(local, size or len(head), head, None)
+        return local
+
+    head = _read_range(serial, path, 0, VIDEO_HEAD_BYTES, timeout=60) or head
+    tail_offset = max(0, (size or 0) - VIDEO_TAIL_BYTES)
+    tail = _read_range(serial, path, tail_offset, VIDEO_TAIL_BYTES, timeout=60)
+    _write_sparse(local, size or len(head), head, tail)
+    return local
+
+
+class VideoFrameGrabber(QObject):
+    """Decodes one frame per clip with Qt, on the GUI thread, one at a time.
+
+    QMediaPlayer has to live on a thread with an event loop, so requests are
+    queued here and answered asynchronously; a watchdog moves on if a file
+    turns out to be undecodable.
+    """
+
+    finished = pyqtSignal(str, object)      # key, QImage or None
+
+    TIMEOUT_MS = 8000
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._queue = []
+        self._current = None
+        self._player = None
+        self._sink = None
+        self._audio = None
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(self._give_up)
+
+    def grab(self, key, local_path, px):
+        self._queue.append((key, local_path, px))
+        if self._current is None:
+            self._start_next()
+
+    def _ensure_player(self):
+        if self._player is not None:
+            return
+        self._sink = QVideoSink(self)
+        self._audio = QAudioOutput(self)
+        self._audio.setMuted(True)
+        self._player = QMediaPlayer(self)
+        self._player.setAudioOutput(self._audio)
+        self._player.setVideoSink(self._sink)
+        self._sink.videoFrameChanged.connect(self._on_frame)
+        self._player.mediaStatusChanged.connect(self._on_status)
+        self._player.errorOccurred.connect(lambda *_: self._give_up())
+
+    def _start_next(self):
+        self._current = None
+        while self._queue:
+            key, local_path, px = self._queue.pop(0)
+            if not os.path.isfile(local_path):
+                self.finished.emit(key, None)
+                continue
+            self._current = (key, local_path, px)
+            break
+        if self._current is None:
+            return
+
+        self._ensure_player()
+        self._timer.start(self.TIMEOUT_MS)
+        self._player.setSource(QUrl.fromLocalFile(self._current[1]))
+
+    def _on_status(self, status):
+        if self._current and status == QMediaPlayer.MediaStatus.LoadedMedia:
+            # A second in avoids the black frame many clips open with.
+            self._player.setPosition(1000)
+            self._player.play()
+
+    def _on_frame(self, frame):
+        if not self._current or not frame.isValid():
+            return
+        image = frame.toImage()
+        if image.isNull() or image.width() <= 1:
+            return
+        self._deliver(image.copy())
+
+    def _give_up(self):
+        self._deliver(None)
+
+    def _deliver(self, image):
+        if not self._current:
+            return
+        key = self._current[0]
+        self._timer.stop()
+        self._player.stop()
+        self._player.setSource(QUrl())
+        self._current = None
+        self.finished.emit(key, image)
+        self._start_next()
+
+
 def _video_frame_bytes(serial, path, size, px):
     ffmpeg = find_ffmpeg()
     if not ffmpeg:
@@ -375,7 +514,12 @@ def _video_frame_bytes(serial, path, size, px):
 # ------------------------------------------------------------------- the cache
 
 class _Signals(QObject):
-    done = pyqtSignal(str, object, int)   # key, QImage or None, generation
+    done = pyqtSignal(str, object, int)            # key, QImage or None, generation
+    video_ready = pyqtSignal(str, str, str, int)   # key, clip path, temp dir, generation
+
+
+# Marker meaning "this job's result will arrive from somewhere else".
+HANDED_OVER = object()
 
 
 class _ThumbnailJob(QRunnable):
@@ -398,8 +542,9 @@ class _ThumbnailJob(QRunnable):
                 data, orientation = _image_bytes(self.serial, self.item['path'],
                                                  self.item['size'], ext)
             elif ext in VIDEO_EXTS:
-                data = _video_frame_bytes(self.serial, self.item['path'],
-                                          self.item['size'], self.px)
+                data = self._video_data()
+                if data is HANDED_OVER:
+                    return
             else:
                 data = None
 
@@ -416,6 +561,33 @@ class _ThumbnailJob(QRunnable):
             image = None
         self.signals.done.emit(self.key, image, self.generation)
 
+    def _video_data(self):
+        """Fetch the clip, and decode here only when ffmpeg can do it.
+
+        Qt's decoder needs the GUI thread, so in that case the clip is handed
+        over and this job is done.
+        """
+        backend = video_backend()
+        if backend == 'ffmpeg':
+            return _video_frame_bytes(self.serial, self.item['path'],
+                                      self.item['size'], self.px)
+        if backend != 'qt':
+            return None
+
+        target = tempfile.mkdtemp(prefix='adbx_clip_')
+        clip = None
+        try:
+            clip = fetch_video_locally(self.serial, self.item['path'],
+                                       self.item['size'], target)
+        except Exception:
+            clip = None
+        if not clip:
+            shutil.rmtree(target, ignore_errors=True)
+            return None
+
+        self.signals.video_ready.emit(self.key, clip, target, self.generation)
+        return HANDED_OVER
+
 
 class ThumbnailCache(QObject):
     """Produces thumbnails off the GUI thread and remembers them."""
@@ -429,9 +601,13 @@ class ThumbnailCache(QObject):
         self._memory_limit = memory_limit
         self._pending = set()
         self._failed = set()
+        self._px_for = {}
         self._generation = 0
         self._signals = _Signals()
         self._signals.done.connect(self._job_finished)
+        self._signals.video_ready.connect(self._video_fetched)
+        self._grabber = None
+        self._video_temp = {}
         self._pool = QThreadPool(self)
         self._pool.setMaxThreadCount(max_workers)
 
@@ -472,9 +648,35 @@ class ThumbnailCache(QObject):
             return None
 
         self._pending.add(key)
+        self._px_for[key] = px
         self._pool.start(_ThumbnailJob(self._signals, serial, item, px, key,
                                        self._generation))
         return None
+
+    def _video_fetched(self, key, clip, temp_dir, generation):
+        """A clip is on disk; let Qt decode one frame from it."""
+        if generation != self._generation or not QT_VIDEO:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            self._pending.discard(key)
+            return
+
+        if self._grabber is None:
+            self._grabber = VideoFrameGrabber(self)
+            self._grabber.finished.connect(self._video_frame_ready)
+
+        self._video_temp[key] = (temp_dir, generation)
+        self._grabber.grab(key, clip, self._px_for.get(key, 96))
+
+    def _video_frame_ready(self, key, image):
+        temp_dir, generation = self._video_temp.pop(key, (None, self._generation))
+        if temp_dir:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+        if image is not None and not image.isNull():
+            px = self._px_for.get(key, 96)
+            image = image.scaled(px, px, Qt.AspectRatioMode.KeepAspectRatio,
+                                 Qt.TransformationMode.SmoothTransformation)
+        self._job_finished(key, image, generation)
 
     def _job_finished(self, key, image, generation):
         self._pending.discard(key)

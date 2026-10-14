@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import QApplication, QMessageBox
 
 from handler import ADBNotFoundError, find_adb
 from logging_config import setup_logging
-from ui.theme import LIGHT
+from ui.theme import stylesheet
 from ui.multi_device_window import MultiDeviceWindow
 
 ADB_HELP_URL = "https://developer.android.com/studio/releases/platform-tools"
@@ -50,7 +50,7 @@ def main():
         app.setApplicationVersion("1.0.0")
         app.setQuitOnLastWindowClosed(True)
 
-        app.setStyleSheet(LIGHT)
+        app.setStyleSheet(stylesheet())
 
         try:
             logger.info(f"Using adb at {find_adb()}")

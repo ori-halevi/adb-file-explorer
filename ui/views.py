@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
     QStyledItemDelegate, QStyleOptionViewItem, QTreeView,
 )
 from PyQt6.QtCore import QMimeData, QSize, Qt, QUrl
-from PyQt6.QtGui import QDrag, QFontMetrics, QGuiApplication, QIcon
+from PyQt6.QtGui import QColor, QDrag, QFontMetrics, QGuiApplication, QIcon
 
 ADB_MIME = "application/x-adb-paths"
 
@@ -277,9 +277,10 @@ class RowDelegate(QStyledItemDelegate):
         line = metrics.height()
 
         if view_option.state & QStyle.StateFlag.State_Selected:
-            painter.setPen(option.palette.highlightedText().color())
+            name_colour = option.palette.highlightedText().color()
         else:
-            painter.setPen(option.palette.text().color())
+            name_colour = option.palette.text().color()
+        painter.setPen(name_colour)
         top = rect.top() + (rect.height() - line * 2) // 2
         painter.drawText(text_left, top + metrics.ascent(),
                          metrics.elidedText(name, Qt.TextElideMode.ElideRight, text_width))
@@ -287,7 +288,11 @@ class RowDelegate(QStyledItemDelegate):
         detail = kind if not size else f"{kind}, {self._pretty(size)}"
         if self._show_date and modified:
             detail = f"{detail}    {modified}" if detail else modified
-        painter.setPen(option.palette.placeholderText().color())
+        # Derived from the name colour rather than taken from the palette, so
+        # the second line stays readable whichever theme is in use.
+        faded = QColor(name_colour)
+        faded.setAlpha(165)
+        painter.setPen(faded)
         painter.drawText(text_left, top + line + metrics.ascent(),
                          metrics.elidedText(detail, Qt.TextElideMode.ElideRight, text_width))
         painter.restore()

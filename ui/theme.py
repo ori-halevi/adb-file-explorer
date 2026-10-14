@@ -1,4 +1,48 @@
-"""Light and dark theme stylesheets for ADB Explorer."""
+"""Light and dark theme stylesheets for ADB Explorer.
+
+Dark is the default. The choice lives in config.ini next to the program, and
+both startup and the View menu read it from here so they cannot disagree.
+"""
+
+import configparser
+import os
+import sys
+from pathlib import Path
+
+DEFAULT_DARK = True
+
+
+def config_path():
+    base = (Path(sys.executable).parent if getattr(sys, 'frozen', False)
+            else Path(os.path.abspath(__file__)).parent)
+    return base / "config.ini"
+
+
+def load_dark():
+    parser = configparser.ConfigParser()
+    try:
+        parser.read(config_path())
+        return parser.getboolean("app", "dark_mode")
+    except Exception:
+        return DEFAULT_DARK
+
+
+def save_dark(dark: bool):
+    parser = configparser.ConfigParser()
+    path = config_path()
+    try:
+        parser.read(path)
+        if "app" not in parser:
+            parser["app"] = {}
+        parser["app"]["dark_mode"] = "yes" if dark else "no"
+        with open(path, "w") as handle:
+            parser.write(handle)
+    except Exception:
+        pass
+
+
+def stylesheet(dark=None):
+    return DARK if (load_dark() if dark is None else dark) else LIGHT
 
 LIGHT = """
 /* ── Root / Global ─────────────────────────────────────── */
@@ -106,6 +150,34 @@ QLineEdit#path_display {
 }
 
 /* ── Tree view (file browser) ──────────────────────────── */
+/* ── Icon, list, tile and content views ────────────────── */
+/* Without these the view's background comes from the system palette while
+   the text colour comes from the stylesheet, which on a dark desktop leaves
+   dark text on a dark background. */
+QListView {
+    background-color: #ffffff;
+    alternate-background-color: #fafafa;
+    color: #2c2c2c;
+    border: none;
+    outline: none;
+    font-size: 12px;
+}
+QListView::item {
+    color: #2c2c2c;
+    padding: 2px;
+    border-radius: 4px;
+}
+QListView::item:selected:active {
+    background-color: #e3effa;
+    color: #1a5a9e;
+}
+QListView::item:selected:!active {
+    background-color: #f0f0f0;
+    color: #444;
+}
+QListView::item:hover:!selected {
+    background-color: #f5f7fa;
+}
 QTreeView {
     background-color: #ffffff;
     alternate-background-color: #fafafa;
@@ -114,6 +186,7 @@ QTreeView {
     font-size: 12px;
 }
 QTreeView::item {
+    color: #2c2c2c;
     padding: 3px 2px;
     min-height: 26px;
 }
@@ -478,6 +551,31 @@ QLineEdit#path_display {
 }
 
 /* ── Tree view (file browser) ──────────────────────────── */
+/* ── Icon, list, tile and content views ────────────────── */
+QListView {
+    background-color: #1e1e2e;
+    alternate-background-color: #181825;
+    color: #cdd6f4;
+    border: none;
+    outline: none;
+    font-size: 12px;
+}
+QListView::item {
+    color: #cdd6f4;
+    padding: 2px;
+    border-radius: 4px;
+}
+QListView::item:selected:active {
+    background-color: #313a55;
+    color: #89b4fa;
+}
+QListView::item:selected:!active {
+    background-color: #2a2a3c;
+    color: #bac2de;
+}
+QListView::item:hover:!selected {
+    background-color: #262637;
+}
 QTreeView {
     background-color: #1e1e2e;
     alternate-background-color: #181825;
@@ -486,6 +584,7 @@ QTreeView {
     font-size: 12px;
 }
 QTreeView::item {
+    color: #cdd6f4;
     padding: 3px 2px;
     min-height: 26px;
 }

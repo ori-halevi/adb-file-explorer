@@ -183,6 +183,18 @@ class DevicePanel(TransferActionsMixin, QWidget):
         refresh_btn.clicked.connect(self.refresh_files)
         nav_layout.addWidget(refresh_btn)
 
+        self.to_pc_btn = QPushButton("\u2193 To PC")
+        self.to_pc_btn.setObjectName("to_pc_btn")
+        self.to_pc_btn.setToolTip("Download the selected files and folders to this PC (Ctrl+E)")
+        self.to_pc_btn.clicked.connect(self.download_selected_items)
+        nav_layout.addWidget(self.to_pc_btn)
+
+        self.from_pc_btn = QPushButton("\u2191 From PC")
+        self.from_pc_btn.setObjectName("from_pc_btn")
+        self.from_pc_btn.setToolTip("Upload files from this PC to the current folder (Ctrl+U)")
+        self.from_pc_btn.clicked.connect(self.upload_file_to_device)
+        nav_layout.addWidget(self.from_pc_btn)
+
         self.view_btn = QToolButton()
         self.view_btn.setText("▦")
         self.view_btn.setToolTip("Change the view (Ctrl+1 to Ctrl+8, or Ctrl+wheel)")
@@ -225,6 +237,8 @@ class DevicePanel(TransferActionsMixin, QWidget):
         self._view_stack = QStackedWidget()
         self._view_stack.addWidget(self._tree)
         self._view_stack.addWidget(self._list)
+
+        self._tree.selectionModel().selectionChanged.connect(self._selection_changed)
 
         for view in (self._tree, self._list):
             view.doubleClicked.connect(self.handle_double_click)
@@ -289,6 +303,7 @@ class DevicePanel(TransferActionsMixin, QWidget):
         self._small_thumb_action.setToolTip(
             "Also fetch pictures for the small views, which costs a read per file")
         self._small_thumb_action.toggled.connect(self._set_small_thumbnails)
+
         return menu
 
     def _small_thumbnails_wanted(self):
@@ -472,6 +487,17 @@ class DevicePanel(TransferActionsMixin, QWidget):
         self.apply_search_filter()
 
     
+
+    def _selection_changed(self, *args):
+        """Keep the status line telling the user what they can do next."""
+        if self._closing:
+            return
+        names = self._selected_names()
+        if not names:
+            self.to_pc_btn.setEnabled(True)
+            return
+        self._note(f"{len(names)} selected - \u2193 To PC, Ctrl+C to copy, "
+                   f"or right-click for more")
 
     def _on_host_clipboard_changed(self):
         """Remember when the PC clipboard last changed, so Ctrl+V can choose

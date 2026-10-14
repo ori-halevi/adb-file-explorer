@@ -5,6 +5,7 @@
 Covers the eight view modes, the cheap thumbnail routes (EXIF for JPEG, head
 plus tail for video), EXIF rotation, lazy loading, and the on-disk cache.
 """
+import atexit
 import os
 import sys
 import time
@@ -46,7 +47,21 @@ def pump(seconds=1.0, until=None):
     return False
 
 
-QSettings("ADB Explorer", "ADB Explorer").clear()
+# The app reads these too, so put back whatever the user had afterwards.
+SETTINGS = QSettings("ADB Explorer", "ADB Explorer")
+SAVED = {key: SETTINGS.value(key) for key in SETTINGS.allKeys()}
+
+
+def restore_settings():
+    SETTINGS.clear()
+    for key, value in SAVED.items():
+        SETTINGS.setValue(key, value)
+    SETTINGS.sync()
+
+
+atexit.register(restore_settings)
+SETTINGS.clear()
+
 window = MultiDeviceWindow()
 window.resize(1100, 700)
 window.show()

@@ -16,6 +16,7 @@ from device_chooser import DeviceChooser
 from ui.device_panel import DevicePanel
 from ui.widgets import ADB_MIME
 from ui.task_manager import BackgroundTaskManager
+from ui import theme
 from ui.theme import LIGHT, DARK
 
 def get_base_dir():
@@ -26,15 +27,11 @@ def get_base_dir():
 CONFIG_PATH = get_base_dir() / "config.ini"
 
 def _load_theme():
-    cp = configparser.ConfigParser()
-    cp.read(CONFIG_PATH)
-    try:
-        return cp.getboolean("app", "dark_mode")
-    except Exception:
-        return False
+    return theme.load_dark()
 
 
 def _save_theme(dark: bool):
+    theme.save_dark(dark)
     cp = configparser.ConfigParser()
     cp.read(CONFIG_PATH)
     if "app" not in cp:

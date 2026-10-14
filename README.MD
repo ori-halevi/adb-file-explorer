@@ -21,6 +21,9 @@ A graphical file manager for Android devices connected via ADB (Android Debug Br
 - **Wireless ADB** - Connect to devices over network (no USB required)
 
 ## Looking at files
+The app is dark by default; View > Dark Mode switches it and the choice is
+kept in `config.ini` beside the program.
+
 The view button in each panel's toolbar offers the same eight modes as
 Explorer - Extra large / Large / Medium / Small icons, List, Details, Tiles
 and Content - on `Ctrl+1` to `Ctrl+8`, or `Ctrl+wheel` to zoom through them.
@@ -68,12 +71,16 @@ interrupted replace leaves the original intact. If the destination cannot be
 read, the transfer stops instead of assuming the folder is empty.
 
 **From the PC to the device**
+- **↑ From PC** in the panel's toolbar picks files to upload here
 - Drag files or folders from Explorer/Finder onto a panel
 - `Ctrl+V` in a panel after copying files in Explorer
 - Right-click > Upload Files / Upload Folder
 - Right-click > Sync Folder - uploads only what changed, so re-running is cheap
 
 **From the device to the PC**
+- Select what you want and press **↓ To PC** in the panel's toolbar, which
+  asks where to put it. This is the same as `Ctrl+E` and as right-click >
+  Download to PC, and it handles folders as well as files.
 - Hold `Alt` and drag items out onto the desktop, Explorer or any app that
   takes files. The files must be fetched before the drag can start, so this is
   limited to selections under 24 MB and only happens when `Alt` is held - a
@@ -124,6 +131,7 @@ themselves:
 ```bash
 python tests/test_transfers.py   # copy, move, conflicts, cancel, failures
 python tests/test_views.py       # view modes, thumbnails, cache, rotation
+python tests/test_theme.py       # readable text in both themes (no device needed)
 ```
 
 `test_transfers.py` covers the destructive paths deliberately - replace,

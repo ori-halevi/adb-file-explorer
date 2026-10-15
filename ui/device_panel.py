@@ -406,6 +406,11 @@ class DevicePanel(TransferActionsMixin, QWidget):
         if mode == views.DETAILS:
             self._view_stack.setCurrentWidget(self._tree)
             self._tree.setIconSize(QSize(16, 16))
+            # Three rows to a wheel notch, as in a details folder window.
+            self._tree.setVerticalScrollMode(
+                QAbstractItemView.ScrollMode.ScrollPerPixel)
+            self._tree.verticalScrollBar().setSingleStep(
+                max(1, self._tree.sizeHintForRow(0) or 20))
         else:
             self._list.apply_mode(mode)
             self._view_stack.setCurrentWidget(self._list)

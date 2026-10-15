@@ -275,6 +275,32 @@ check("head and tail land at their real offsets",
 os.remove(sparse)
 
 h.delete_item(BASE, is_dir=True, missing_ok=True)
+print("\n=== scrolling keeps the pace of a folder window ===")
+# Windows turns one wheel notch into three lines, and Qt multiplies those
+# by the scroll bar's step. Per-item scrolling ignores both and jumps a
+# whole row, which is what made this feel wrong.
+from PyQt6.QtWidgets import QAbstractItemView as _AIV
+from ui.views import FileListView as _FLV, ICONS_XL, LIST as _LIST, TILES as _TILES
+
+_scroller = _FLV(None, None)
+for _mode, _label in ((ICONS_XL, "extra large icons"), (_TILES, "tiles")):
+    _scroller.apply_mode(_mode)
+    _bar = _scroller.verticalScrollBar()
+    _cell = _scroller.gridSize().height()
+    check(f"{_label}: scrolls by the pixel, not by the item",
+          _scroller.verticalScrollMode() == _AIV.ScrollMode.ScrollPerPixel)
+    check(f"{_label}: three lines come to about one row",
+          abs(_bar.singleStep() * 3 - _cell) <= 3,
+          f"step {_bar.singleStep()} x3 vs row {_cell}")
+
+_scroller.apply_mode(_LIST)
+check("a list scrolls sideways by the pixel too",
+      _scroller.horizontalScrollMode() == _AIV.ScrollMode.ScrollPerPixel)
+check("and a notch is about one column wide",
+      abs(_scroller.horizontalScrollBar().singleStep() * 3
+          - _scroller.gridSize().width()) <= 3,
+      str(_scroller.horizontalScrollBar().singleStep()))
+
 print(f"\n{'=' * 60}\nPASSED {len(PASS)}  FAILED {len(FAIL)}")
 if FAIL:
     print("FAILURES:")

@@ -21,7 +21,7 @@ sys.path.insert(0, ROOT)
 os.chdir(ROOT)
 
 from PyQt6.QtCore import QMimeData, QPoint, QPointF, Qt, QUrl
-from PyQt6.QtCore import QEvent
+from PyQt6.QtCore import QEvent, QItemSelectionModel
 from PyQt6.QtGui import (QDragMoveEvent, QDropEvent, QMouseEvent,
                          QStandardItem, QStandardItemModel)
 from PyQt6.QtWidgets import QApplication, QMenu
@@ -376,6 +376,12 @@ for label, view in (("tree", DropTreeView(None, panel)), ("list", FileListView(N
 
     view._drag_took_over = True        # as it is when a drag ate the release
     view.setState(QAbstractItemView.State.DragSelectingState)
+    view.selectionModel().select(
+        model.index(0, 0),
+        QItemSelectionModel.SelectionFlag.Select
+        | QItemSelectionModel.SelectionFlag.Rows)
+    clicks = []
+    view.clicked.connect(lambda index: clicks.append(index))
     view.mouseReleaseEvent(
         QMouseEvent(QEvent.Type.MouseButtonRelease, QPointF(10, 10),
                     Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton,
@@ -383,6 +389,58 @@ for label, view in (("tree", DropTreeView(None, panel)), ("list", FileListView(N
     check(f"{label}: a swallowed release still ends the sweep",
           view.state() == QAbstractItemView.State.NoState, str(view.state()))
     check(f"{label}: and repaints, so the rectangle goes", bool(painted))
+    check(f"{label}: without costing the dragged selection",
+          [i.row() for i in view.selectionModel().selectedRows()] == [0],
+          str([i.row() for i in view.selectionModel().selectedRows()]))
+    check(f"{label}: and without reading as a click", clicks == [], str(clicks))
+
+print("\n=== 11. a drag too large to fetch remembers what it wanted ===")
+# The gesture says copy or move; only the folder it landed on is lost, so
+# the user should not have to press the same keys and drag a second time.
+from ui.transfer_actions import TransferActionsMixin
+
+
+class Intent(TransferActionsMixin):
+    """Just the parts of a panel the remembering touches."""
+
+    def __init__(self):
+        self._notes = []
+        self.device_serial = "TESTDEVICE"
+
+    def _note(self, text):
+        self._notes.append(text)
+
+
+holder = Intent()
+import ui.transfer_actions as _ta
+real_mods = _ta.QGuiApplication.keyboardModifiers
+
+
+class Mods:
+    def __init__(self, value):
+        self.value = value
+
+    def __call__(self):
+        return self.value
+
+
+_ta.QGuiApplication.keyboardModifiers = staticmethod(
+    Mods(Qt.KeyboardModifier.ShiftModifier))
+holder._fetch_after_gesture(["a.jpg", "b.jpg"])
+check("Shift on a deferred drag is remembered as a move",
+      holder._drag_intent == 'move', str(holder._drag_intent))
+
+_ta.QGuiApplication.keyboardModifiers = staticmethod(
+    Mods(Qt.KeyboardModifier.NoModifier))
+holder._fetch_after_gesture(["a.jpg"])
+check("and a plain one as a copy", holder._drag_intent == 'copy',
+      str(holder._drag_intent))
+check("the names are kept for the fetch", holder._pending_fetch == ["a.jpg"],
+      str(holder._pending_fetch))
+check("a drop inside the app forgets both",
+      holder.take_pending_fetch(run=False) is False
+      and holder._drag_intent is None and holder._pending_fetch is None)
+_ta.QGuiApplication.keyboardModifiers = real_mods
 
 print(f"\n{'=' * 60}\nPASSED {len(PASS)}  FAILED {len(FAIL)}")
 if FAIL:

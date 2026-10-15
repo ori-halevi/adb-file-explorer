@@ -392,17 +392,26 @@ class DropMixin:
         self._end_sweep()
 
         if getattr(self, '_drag_took_over', False):
-            # The drag swallowed this gesture. Handing the release on would
-            # let the view collapse the selection to whatever sits under the
-            # cursor now, which is not where the drag began.
+            # A drag took this gesture over. The release still has to reach
+            # the view, because that is the only thing that erases a
+            # selection rectangle - a repaint on its own draws it again.
+            # Handing it on plainly would collapse the selection to whatever
+            # sits under the cursor now, so it goes through with selection
+            # turned off and the signals of a click held back.
             self._drag_took_over = False
-            event.accept()
+            mode = self.selectionMode()
+            blocked = self.signalsBlocked()
+            self.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+            self.blockSignals(True)
+            try:
+                super().mouseReleaseEvent(event)
+            finally:
+                self.blockSignals(blocked)
+                self.setSelectionMode(mode)
         else:
             super().mouseReleaseEvent(event)
 
-        # Whichever way the gesture ended, nothing of it should still be
-        # drawn: a selection rectangle left on screen outlives its gesture
-        # when the release does not reach the view that painted it.
+        # Whichever way it ended, nothing of the gesture should still show.
         self.setState(QAbstractItemView.State.NoState)
         self.viewport().update()
 
@@ -603,6 +612,21 @@ class FileListView(DropMixin, QListView):
         self._mode = ICONS_M
         self._row_delegate = None
 
+    def _match_explorer_scrolling(self, step):
+        """Scroll a wheel notch the distance Explorer would.
+
+        Windows turns one notch into however many lines the user has set,
+        three by default, and Qt multiplies that by the scroll bar's step.
+        Per-item scrolling ignores all of it and jumps a whole row at a
+        time, which is what made this feel unlike every other file list.
+        """
+        step = max(1, int(step))
+        for mode_setter in (self.setVerticalScrollMode,
+                            self.setHorizontalScrollMode):
+            mode_setter(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.verticalScrollBar().setSingleStep(step)
+        self.horizontalScrollBar().setSingleStep(step)
+
     def apply_mode(self, mode):
         self._mode = mode
         px = icon_px(mode)
@@ -643,5 +667,12 @@ class FileListView(DropMixin, QListView):
             self.setUniformItemSizes(True)
             self._row_delegate = RowDelegate(self, 600, 48, show_date=True)
             self.setItemDelegate(self._row_delegate)
+
+        # A notch should carry the eye about one row, as it does in a folder
+        # window; the three lines Windows sends make that a third of a row.
+        cell = self.gridSize()
+        across = mode == LIST
+        reach = (cell.width() if across else cell.height()) or (px + 42)
+        self._match_explorer_scrolling(reach / 3)
 
         self.doItemsLayout()

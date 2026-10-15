@@ -13,7 +13,8 @@ device-to-device sender share one set of rules:
 import os
 import time
 
-from PyQt6.QtCore import QObject, QTimer, pyqtSignal
+from PyQt6.QtCore import QObject, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QGuiApplication
 from PyQt6.QtWidgets import QDialog, QFileDialog, QMessageBox
 
 from ui import transfer
@@ -648,8 +649,8 @@ class TransferActionsMixin:
 
     # ------------------------------------------------------------ device to PC
 
-    def download_selected_items(self, dest_dir=None):
-        names = self._selected_names()
+    def download_selected_items(self, dest_dir=None, names=None, then=None):
+        names = names or self._selected_names()
         if not names or not self._connected():
             return
 
@@ -721,9 +722,14 @@ class TransferActionsMixin:
                 outcome.record(name, ok, handler.last_error)
             return outcome
 
-        self._run_modal(f"Downloading {total} item(s)", run,
-                        on_done=lambda outcome: self._report_outcome(
-                            outcome, f"Downloaded to {dest_dir} -", refresh=False),
+        def finished(outcome):
+            self._report_outcome(outcome, f"Downloaded to {dest_dir} -",
+                                 refresh=False)
+            if then and not outcome.cancelled and not outcome.failed:
+                # Out of this dialog's own callback before opening the next.
+                QTimer.singleShot(0, then)
+
+        self._run_modal(f"Downloading {total} item(s)", run, on_done=finished,
                         on_error=lambda: self._report_error("Download failed"), ctx=ctx)
 
     def is_dir_for_path(self, path):
@@ -812,6 +818,12 @@ class TransferActionsMixin:
         is only marked here. The view runs it the moment the drag returns.
         """
         self._pending_fetch = list(names)
+        # Remember what the gesture was asking for, so finishing it later
+        # does not mean pressing the same keys and dragging all over again.
+        mods = QGuiApplication.keyboardModifiers()
+        self._drag_intent = ('move'
+                             if mods & Qt.KeyboardModifier.ShiftModifier
+                             else 'copy')
         limit_mb = transfer.DRAG_OUT_SIZE_LIMIT // (1024 * 1024)
         self._note(f"More than {limit_mb} MB to fetch - preparing it now, "
                    f"then drag again")
@@ -826,6 +838,7 @@ class TransferActionsMixin:
         names = getattr(self, '_pending_fetch', None)
         self._pending_fetch = None
         if not names or not run or getattr(self, '_closing', False):
+            self._drag_intent = None
             return False
         QTimer.singleShot(0, lambda: (
             None if getattr(self, '_closing', False)
@@ -926,7 +939,10 @@ class TransferActionsMixin:
             # Keep the cap off what was just fetched, then say it is ready.
             transfer.trim_folder(folder, transfer.SCRATCH_LIMIT, keep=prepared)
             if still_missing:
+                self._drag_intent = None
                 self._report_outcome(outcome, "Prepared", refresh=False)
+            elif getattr(self, '_drag_intent', None):
+                self._continue_after_prepare(names)
             else:
                 self._note(f"{len(prepared)} item(s) ready - drag them to the "
                            f"PC now, or press Ctrl+E to send them to a folder")
@@ -934,6 +950,49 @@ class TransferActionsMixin:
         self._run_modal(title, run, on_done=on_done,
                         on_error=lambda: self._report_error("Could not prepare"),
                         ctx=ctx)
+
+    def _continue_after_prepare(self, names):
+        """Carry on with the transfer the drag was asking for.
+
+        The gesture already said what to do - a copy, or a move if Shift
+        was held - and that is remembered, so there is nothing to press
+        again. The one thing it cannot say is where: Windows never tells an
+        application what a drag was dropped on. So the folder is offered
+        with the last one already filled in, and finishing is one key.
+        """
+        action = getattr(self, '_drag_intent', 'copy') or 'copy'
+        self._drag_intent = None
+        verb = "Move" if action == 'move' else "Copy"
+        dest = (self._last_download_dir
+                or os.path.join(os.path.expanduser("~"), "Downloads"))
+
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle(f"Finish the {verb.lower()}")
+        box.setText(f"{len(names)} item(s) are ready.")
+        box.setInformativeText(f"{verb} them to:\n{dest}")
+        go = box.addButton(f"{verb} here", QMessageBox.ButtonRole.AcceptRole)
+        pick = box.addButton("Choose folder...",
+                             QMessageBox.ButtonRole.ActionRole)
+        box.addButton("Not now", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(go)
+        box.exec()
+        chosen = box.clickedButton()
+
+        if chosen is pick:
+            dest = QFileDialog.getExistingDirectory(self, f"{verb} to", dest)
+            if not dest:
+                return
+        elif chosen is not go:
+            self._note(f"{len(names)} item(s) ready - drag them whenever "
+                       f"you like")
+            return
+
+        remote = [self._remote_path(n) for n in names]
+        self.download_selected_items(
+            dest, names=names,
+            then=(lambda: self.confirm_move_to_pc(remote))
+            if action == 'move' else None)
 
     def offer_download_after_drag(self, remote_paths):
         """A drag that had nothing to hand over, let go somewhere else.

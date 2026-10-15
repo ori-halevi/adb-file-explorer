@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
     QStyledItemDelegate, QStyleOptionViewItem, QTreeView,
 )
 from PyQt6.QtCore import QItemSelectionModel, QMimeData, QSize, Qt, QUrl
-from PyQt6.QtGui import (QColor, QDrag, QFontMetrics, QGuiApplication, QIcon,
+from PyQt6.QtGui import (QColor, QCursor, QDrag, QFontMetrics, QGuiApplication, QIcon,
                          QPainter, QPixmap)
 
 ADB_MIME = "application/x-adb-paths"
@@ -396,10 +396,24 @@ class DropMixin:
         result = drag.exec(Qt.DropAction.CopyAction | Qt.DropAction.MoveAction,
                            default)
 
-        # Dropped outside this application: whoever took the files has copied
-        # them already, so a move only has the originals left to remove.
-        if drag.target() is None and result == Qt.DropAction.MoveAction and local_paths:
-            self.main_window.confirm_move_to_pc(paths)
+        if local_paths:
+            # Dropped outside this application: whoever took the files has
+            # copied them already, so a move only has the originals to remove.
+            if drag.target() is None and result == Qt.DropAction.MoveAction:
+                self.main_window.confirm_move_to_pc(paths)
+        elif drag.target() is None and self._ended_outside_the_app():
+            # Nothing could be carried, and the drag ended somewhere else -
+            # so offer the transfer that does work at any size.
+            self.main_window.offer_download_after_drag(paths)
+
+    @staticmethod
+    def _ended_outside_the_app():
+        """True when the pointer finished over something that is not ours."""
+        where = QCursor.pos()
+        for window in QApplication.topLevelWidgets():
+            if window.isVisible() and window.frameGeometry().contains(where):
+                return False
+        return True
 
     def _drag_pixmap(self, indexes):
         """What the cursor carries: the first icon, with a count beside it."""

@@ -263,7 +263,8 @@ check("no index at all is not",
       thumbnails.has_moov(FTYP + b'\x00\x00\x00\x10mdat' + b'\x00' * 8) is False)
 
 sparse = os.path.join(tempfile.gettempdir(), 'adbx_sparse_test.bin')
-thumbnails._write_sparse(sparse, 10_000_000, b'HEAD' * 4, b'TAIL' * 4)
+thumbnails._write_sparse(sparse, 10_000_000, (0, b'HEAD' * 4),
+                         (10_000_000 - 16, b'TAIL' * 4))
 with open(sparse, 'rb') as fh:
     head_read = fh.read(16)
     fh.seek(10_000_000 - 16)

@@ -43,9 +43,11 @@ parts company with Explorer, where pressing an unselected file selects it and
 drags it in one motion; here that gesture is kept for selecting.
 
 Dragging out to Explorer, the desktop, or anything else that takes files
-copies them there. A selection under 24 MB is fetched as the drag starts, so
-it can be dropped anywhere; a larger one still drags between panels, and the
-status bar points at "To PC" instead. If the place you drop into asks for a
+copies them there. The files have to be on disk before a drag can begin, so
+a selection under 24 MB is fetched as it starts. A larger one still drags
+between panels and into folders, and if such a drag is let go outside the
+app, the panel offers to download the items instead - that route has no size
+limit, and shows progress. If the place you drop into asks for a
 move rather than a copy, the files are copied first and the panel then asks
 before deleting the originals from the phone.
 
@@ -101,12 +103,15 @@ and only for the rows actually on screen:
 - **PNG, WebP, GIF, BMP** - fetched whole, but only below 2 MB.
 - **Video** - decoded by Qt's multimedia backend, which ships inside PyQt6
   and therefore inside the packaged app: nothing has to be installed and
-  nothing is downloaded. Instead of pulling a whole clip, the head is read,
-  and the tail too if the index lives at the end; they are written into a
-  sparse local file at their real offsets so a decoder can find one frame. A
-  9.6 MB clip usually costs 1.5 MB and about a third of a second. If an
-  `ffmpeg` happens to be on `PATH` (or in `FFMPEG_PATH`) it is used instead,
-  purely because it can run on a worker thread, but it is never required.
+  nothing is downloaded. Instead of pulling a whole clip, the first
+  megabyte and a half is read, which is all a phone's "faststart" recording
+  needs. When the index sits at the end instead, as it does in a long
+  recording, the app walks the file's boxes on the device to find exactly
+  where it is and reads just that. Both pieces go into a sparse local file
+  at their real offsets, so a 968 MB video costs a few megabytes and about
+  four seconds. If an `ffmpeg` happens to be on `PATH` (or in `FFMPEG_PATH`)
+  it is used instead, purely because it can run on a worker thread, but it
+  is never required.
 
 Every thumbnail is stamped with the icon of the program that opens that kind
 of file, the way a desktop file manager does, and videos also carry a play

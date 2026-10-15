@@ -743,6 +743,23 @@ class TransferActionsMixin:
                        f"or anywhere on the PC")
         return local
 
+    def offer_download_after_drag(self, remote_paths):
+        """A drag that had nothing to hand over, ending somewhere else.
+
+        The files were too large to fetch while the drag started, so rather
+        than leaving the gesture dead, offer the transfer that has no limit.
+        """
+        names = [p.rstrip('/').split('/')[-1] for p in remote_paths]
+        if not names:
+            return
+        listed = ", ".join(names[:3]) + ("..." if len(names) > 3 else "")
+        limit_mb = transfer.DRAG_OUT_SIZE_LIMIT // (1024 * 1024)
+        if self._confirm(
+                "Too large to drag",
+                f"{len(names)} item(s) are larger than the {limit_mb} MB a drag "
+                f"can carry.\n\n{listed}\n\nDownload them to the PC instead?"):
+            self.download_selected_items()
+
     def confirm_move_to_pc(self, remote_paths):
         """A drag out that the receiver treated as a move.
 

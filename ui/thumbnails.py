@@ -201,14 +201,26 @@ def _adb_exec(serial, command, timeout=30):
     return result.stdout
 
 
+BLOCK = 65536
+
+
+def _read_blocks(serial, path, offset, length, timeout=30):
+    """Read the whole 64 KB blocks covering [offset, offset + length).
+
+    Returns (start, data): the read is aligned to a block boundary, so it
+    usually begins a little before the offset that was asked for.
+    """
+    skip = offset // BLOCK
+    start = skip * BLOCK
+    count = max(1, ((offset - start) + length + BLOCK - 1) // BLOCK)
+    command = (f'dd if={shell_quote(path)} bs={BLOCK} skip={skip} count={count} '
+               f'2>/dev/null')
+    return start, _adb_exec(serial, command, timeout=timeout)
+
+
 def _read_range(serial, path, offset, length, timeout=30):
     """Read `length` bytes starting at `offset`, in whole 64 KB blocks."""
-    block = 65536
-    skip = offset // block
-    count = max(1, (length + block - 1) // block)
-    command = (f'dd if={shell_quote(path)} bs={block} skip={skip} count={count} '
-               f'2>/dev/null')
-    return _adb_exec(serial, command, timeout=timeout)
+    return _read_blocks(serial, path, offset, length, timeout)[1]
 
 
 def _find_exif(data):
@@ -349,21 +361,20 @@ def _image_bytes(serial, path, size, ext):
     return None, 1
 
 
-def _write_sparse(local_path, total_size, head, tail):
-    """Write the head and tail of a file at their real offsets.
+def _write_sparse(local_path, total_size, *pieces):
+    """Write pieces of a file at their real offsets, leaving the rest a hole.
 
-    The gap is left as a hole, so only the fetched bytes occupy space, and a
-    reader that seeks (like ffmpeg looking for an MP4 index at the end) sees a
-    file of the right length.
+    Only the fetched bytes take up space, and a reader that seeks - a decoder
+    looking for an MP4's index, say - sees a file of the right length. Each
+    piece is (offset, data).
     """
     with open(local_path, 'wb') as handle:
         handle.truncate(total_size)
-        if head:
-            handle.seek(0)
-            handle.write(head)
-        if tail:
-            handle.seek(max(0, total_size - len(tail)))
-            handle.write(tail)
+        for offset, data in pieces:
+            if not data:
+                continue
+            handle.seek(max(0, min(offset, max(0, total_size - len(data)))))
+            handle.write(data)
 
 
 def has_moov(data):
@@ -410,6 +421,60 @@ def _run_ffmpeg(ffmpeg, clip, out, px):
     return None
 
 
+# An index bigger than this is not worth fetching for one thumbnail.
+MAX_MOOV_BYTES = 24 * 1024 * 1024
+
+
+def locate_moov(serial, path, size, max_boxes=16):
+    """Walk an MP4's top-level boxes on the device to find its index.
+
+    A long recording keeps its index at the end, and it can be megabytes, so
+    neither a fixed head nor a fixed tail is sure to contain it. Walking the
+    box chain costs a handful of tiny reads and finds it exactly.
+    """
+    offset = 0
+    for _ in range(max_boxes):
+        start, data = _read_blocks(serial, path, offset, 32)
+        if not data:
+            return None
+        rel = offset - start
+        if rel + 16 > len(data):
+            return None
+
+        box_size = int.from_bytes(data[rel:rel + 4], 'big')
+        box_type = data[rel + 4:rel + 8]
+        if box_size == 1:
+            box_size = int.from_bytes(data[rel + 8:rel + 16], 'big')
+        if box_size < 8:
+            return None
+        if box_type == b'moov':
+            return offset, box_size
+
+        offset += box_size
+        if size and offset >= size:
+            return None
+    return None
+
+
+def _fetch_with_index(serial, path, size, local, head, timeout=120):
+    """Write a sparse copy holding the first frames and the real index."""
+    found = locate_moov(serial, path, size)
+    if found:
+        moov_offset, moov_size = found
+        if moov_size <= MAX_MOOV_BYTES:
+            start, moov = _read_blocks(serial, path, moov_offset, moov_size,
+                                       timeout=timeout)
+            if moov:
+                _write_sparse(local, size or len(head), (0, head), (start, moov))
+                return True
+
+    tail_offset = max(0, (size or 0) - VIDEO_TAIL_BYTES)
+    tail = _read_range(serial, path, tail_offset, VIDEO_TAIL_BYTES, timeout=60)
+    _write_sparse(local, size or len(head), (0, head),
+                  (max(0, (size or 0) - len(tail or b'')), tail))
+    return bool(tail)
+
+
 def fetch_video_locally(serial, path, size, target_dir):
     """Put enough of a remote clip on disk for a decoder to find a frame.
 
@@ -430,13 +495,11 @@ def fetch_video_locally(serial, path, size, target_dir):
     if not head:
         return None
     if has_moov(head):
-        _write_sparse(local, size or len(head), head, None)
+        _write_sparse(local, size or len(head), (0, head))
         return local
 
     head = _read_range(serial, path, 0, VIDEO_HEAD_BYTES, timeout=60) or head
-    tail_offset = max(0, (size or 0) - VIDEO_TAIL_BYTES)
-    tail = _read_range(serial, path, tail_offset, VIDEO_TAIL_BYTES, timeout=60)
-    _write_sparse(local, size or len(head), head, tail)
+    _fetch_with_index(serial, path, size, local, head)
     return local
 
 
@@ -607,7 +670,7 @@ def _video_frame_bytes(serial, path, size, px):
         if not head:
             return None
         if has_moov(head):
-            _write_sparse(clip, size or len(head), head, None)
+            _write_sparse(clip, size or len(head), (0, head))
             frame = _run_ffmpeg(ffmpeg, clip, out, px)
             if frame:
                 return frame
@@ -615,9 +678,7 @@ def _video_frame_bytes(serial, path, size, px):
         # Otherwise the index is at the end, so fetch a larger head and the
         # tail and place both at their real offsets.
         head = _read_range(serial, path, 0, VIDEO_HEAD_BYTES, timeout=60) or head
-        tail_offset = max(0, (size or 0) - VIDEO_TAIL_BYTES)
-        tail = _read_range(serial, path, tail_offset, VIDEO_TAIL_BYTES, timeout=60)
-        _write_sparse(clip, size or len(head), head, tail)
+        _fetch_with_index(serial, path, size, clip, head)
         return _run_ffmpeg(ffmpeg, clip, out, px)
 
 

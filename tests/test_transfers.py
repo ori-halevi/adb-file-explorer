@@ -347,10 +347,15 @@ check("the drag offers the item to other apps on the PC",
 check("and still carries the internal format for panel-to-panel drops",
       dragged.get('adb') is True)
 
-# a selection past the limit must not stall the drag while it is fetched
+# A selection past the limit must not stall the drag while it is fetched,
+# and the gesture must not simply die either: letting go of it outside the
+# app offers the download, which has no size limit.
 dragged.clear()
+offered = []
 real_size = panel.selection_size
+real_offer = panel.offer_download_after_drag
 panel.selection_size = lambda timeout=20: transfer.DRAG_OUT_SIZE_LIMIT + 1
+panel.offer_download_after_drag = lambda paths: offered.append(list(paths))
 panel.tree_view.startDrag(Qt.DropAction.CopyAction)
 panel.selection_size = real_size
 QDrag.exec = real_exec
@@ -358,6 +363,9 @@ check("a large selection is not fetched for the drag", not dragged.get('urls'),
       str(dragged.get('urls')))
 check("and the panel says what to use instead",
       "To PC" in panel.status_label.text(), panel.status_label.text())
+check("letting go outside the app offers the download instead",
+      offered and offered[0], str(offered))
+panel.offer_download_after_drag = real_offer
 
 print("\n=== 14. '..' is never treated as a selectable item ===")
 goto(f"{BASE}/into")

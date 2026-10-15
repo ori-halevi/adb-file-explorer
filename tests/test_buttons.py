@@ -17,11 +17,14 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 os.chdir(ROOT)
 
-from PyQt6.QtWidgets import QApplication, QFileDialog, QPushButton, QToolButton
+from PyQt6.QtWidgets import (QApplication, QFileDialog, QMenu, QPushButton,
+                             QToolButton)
 from PyQt6.QtGui import QStandardItem
-from PyQt6.QtCore import QItemSelectionModel
+from PyQt6.QtCore import QItemSelectionModel, QPoint, Qt
+from PyQt6.QtTest import QTest
 
 from ui import theme
+from ui import views
 from ui.device_panel import DevicePanel
 
 app = QApplication(sys.argv)
@@ -179,6 +182,175 @@ QFileDialog.getOpenFileNames = staticmethod(fake_files)
 panel.from_pc_btn.click()
 app.processEvents()
 check("the file picker was shown", bool(picked), str(picked))
+
+print("\n=== 5. selecting with the mouse works in every view ===")
+# This is what made "To PC" look dead: a list view selects a cell, not a row,
+# so selectedRows() came back empty while items looked selected on screen.
+panel.tree_model.clear()
+panel.tree_model.setHorizontalHeaderLabels(
+    ['Name', 'Type', 'Size', 'Permissions', 'Modified'])
+panel.all_files = []
+for i in range(5):
+    panel.tree_model.appendRow([
+        QStandardItem(f"shot{i}.jpg"), QStandardItem("File"), QStandardItem("2048"),
+        QStandardItem("-rw-rw----"), QStandardItem("2026-01-0%d 10:00" % (i + 1))])
+    panel._items_by_name[f"shot{i}.jpg"] = {
+        'name': f"shot{i}.jpg", 'path': f"/sdcard/Pictures/shot{i}.jpg",
+        'size': 2048, 'modified': "2026-01-01 10:00", 'is_dir': False,
+        'item': panel.tree_model.item(i, 0)}
+app.processEvents()
+
+
+def click_row(view, row, modifier=Qt.KeyboardModifier.NoModifier):
+    QTest.mouseClick(view.viewport(), Qt.MouseButton.LeftButton, modifier,
+                     view.visualRect(panel.tree_model.index(row, 0)).center())
+    app.processEvents()
+
+
+for mode, label, _ in views.VIEW_MODES:
+    panel.set_view_mode(mode)
+    app.processEvents()
+    view = panel.tree_view
+    view.resize(900, 500)
+    panel.tree_view.selectionModel().clearSelection()
+    click_row(view, 1)
+    click_row(view, 3, Qt.KeyboardModifier.ControlModifier)
+    picked_names = panel._selected_names()
+    check(f"ctrl-click selects two items in {label}",
+          picked_names == ["shot1.jpg", "shot3.jpg"], str(picked_names))
+
+panel.set_view_mode(views.ICONS_M)
+app.processEvents()
+panel.tree_view.selectionModel().clearSelection()
+click_row(panel.tree_view, 0)
+click_row(panel.tree_view, 3, Qt.KeyboardModifier.ShiftModifier)
+check("shift-click selects a range in an icon view",
+      panel._selected_names() == ["shot0.jpg", "shot1.jpg", "shot2.jpg", "shot3.jpg"],
+      str(panel._selected_names()))
+
+print("\n=== 6. To PC works from an icon view, where it used to do nothing ===")
+handler.calls.clear()
+asked.clear()
+panel.tree_view.selectionModel().clearSelection()
+click_row(panel.tree_view, 2)
+check("one item is selected in the icon view", panel._selected_names() == ["shot2.jpg"],
+      str(panel._selected_names()))
+panel.to_pc_btn.click()
+for _ in range(80):
+    app.processEvents()
+    if handler.calls:
+        break
+pulls = [c for c in handler.calls if c[0] == 'pull_items']
+check("the download ran from the icon view", bool(pulls), str(handler.calls))
+if pulls:
+    check("it pulled the item that was clicked",
+          pulls[0][1] == ["/sdcard/Pictures/shot2.jpg"], str(pulls[0][1]))
+
+print("\n=== 7. select all, invert, and the status line ===")
+panel.select_all_items()
+app.processEvents()
+check("select all picks every row", len(panel._selected_names()) == 5,
+      str(len(panel._selected_names())))
+panel.invert_selection()
+app.processEvents()
+check("inverting a full selection leaves nothing", panel._selected_names() == [],
+      str(panel._selected_names()))
+panel.tree_view.selectionModel().clearSelection()
+click_row(panel.tree_view, 1)
+panel.invert_selection()
+app.processEvents()
+check("inverting one selection picks the other four",
+      len(panel._selected_names()) == 4, str(panel._selected_names()))
+
+panel.tree_view.selectionModel().clearSelection()
+click_row(panel.tree_view, 0)
+click_row(panel.tree_view, 1, Qt.KeyboardModifier.ControlModifier)
+status = panel.status_label.text()
+check("the status line counts the selection like a file manager",
+      "2 files" in status and "4.0 KB" in status, status)
+
+print("\n=== 8. the context menu follows the selection ===")
+captured = []
+original_exec = QMenu.exec
+
+
+def capture(self, *args, **kwargs):
+    captured.append([a.text().split(chr(9))[0] for a in self.actions()])
+    return None
+
+
+QMenu.exec = capture
+
+panel.tree_view.selectionModel().clearSelection()
+app.processEvents()
+last = panel.tree_view.visualRect(panel.tree_model.index(
+    panel.tree_model.rowCount() - 1, 0))
+empty_spot = QPoint(last.right() + 40, last.bottom() + 40)
+assert not panel.tree_view.indexAt(empty_spot).isValid(), "pick a truly empty spot"
+panel.show_context_menu(empty_spot)            # empty space
+background = captured[-1] if captured else []
+check("the background menu offers View and Sort by",
+      "View" in background and "Sort by" in background, str(background))
+check("the background menu offers New and Upload from PC",
+      "New" in background and "Upload from PC" in background, str(background))
+check("the background menu does not offer Delete", "Delete" not in background,
+      str(background))
+
+click_row(panel.tree_view, 2)
+panel.show_context_menu(panel.tree_view.visualRect(
+    panel.tree_model.index(2, 0)).center())
+single = captured[-1]
+check("a single file offers Open on PC and Rename",
+      "Open on PC" in single and "Rename" in single, str(single))
+check("a single file offers Download to PC", "Download to PC..." in single, str(single))
+
+panel.select_all_items()
+app.processEvents()
+panel.show_context_menu(panel.tree_view.visualRect(
+    panel.tree_model.index(2, 0)).center())
+many = captured[-1]
+check("several items offer Batch rename instead of Rename",
+      "Batch rename..." in many and "Rename" not in many, str(many))
+
+print("\n=== 9. right-clicking outside the selection moves it ===")
+panel.tree_view.selectionModel().clearSelection()
+click_row(panel.tree_view, 0)
+panel.show_context_menu(panel.tree_view.visualRect(
+    panel.tree_model.index(4, 0)).center())
+check("the menu acts on the item under the cursor",
+      panel._selected_names() == ["shot4.jpg"], str(panel._selected_names()))
+
+QMenu.exec = original_exec
+
+print("\n=== 10. sorting ===")
+from handler import FileItem
+panel.all_files = [
+    FileItem("b.txt", "/sdcard/Pictures/b.txt", False, 300, "-rw-", "2026-01-02 10:00"),
+    FileItem("a.txt", "/sdcard/Pictures/a.txt", False, 900, "-rw-", "2026-01-03 10:00"),
+    FileItem("zz", "/sdcard/Pictures/zz", True, 0, "drw-", "2026-01-01 10:00"),
+]
+panel.refresh_files = lambda *a, **k: None
+panel.set_sort('name', False)
+panel.apply_search_filter()
+app.processEvents()
+order = [panel.tree_model.data(panel.tree_model.index(r, 0))
+         for r in range(panel.tree_model.rowCount())]
+check("folders come first, then names",
+      order == ["..", "zz", "a.txt", "b.txt"], str(order))
+
+panel.set_sort('size', True)
+app.processEvents()
+order = [panel.tree_model.data(panel.tree_model.index(r, 0))
+         for r in range(panel.tree_model.rowCount())]
+check("sorting by size, largest first",
+      order == ["..", "zz", "a.txt", "b.txt"], str(order))
+
+panel.set_sort('size', False)
+app.processEvents()
+order = [panel.tree_model.data(panel.tree_model.index(r, 0))
+         for r in range(panel.tree_model.rowCount())]
+check("sorting by size, smallest first",
+      order == ["..", "zz", "b.txt", "a.txt"], str(order))
 
 print(f"\n{'=' * 60}\nPASSED {len(PASS)}  FAILED {len(FAIL)}")
 if FAIL:

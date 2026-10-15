@@ -85,9 +85,17 @@ class TransferActionsMixin:
     def _remote_path(self, name, directory=None):
         return f"{(directory or self._dest_dir()).rstrip('/')}/{name}"
 
+    def selected_rows(self):
+        """The rows the user has selected, in whichever view is showing."""
+        view = self.tree_view
+        getter = getattr(view, 'selected_rows', None)
+        if callable(getter):
+            return getter()
+        return view.selectionModel().selectedRows()
+
     def _selected_names(self):
         names = []
-        for index in self.tree_view.selectionModel().selectedRows():
+        for index in self.selected_rows():
             name = self.tree_model.data(index.siblingAtColumn(0))
             if name and name != "..":
                 names.append(name)
@@ -447,13 +455,13 @@ class TransferActionsMixin:
 
     # ------------------------------------------------------------ PC to device
 
-    def upload_paths(self, local_paths, sync=False):
-        """Upload files and folders from the PC into the current folder."""
+    def upload_paths(self, local_paths, sync=False, dest_dir=None):
+        """Upload files and folders from the PC into a folder on the device."""
         local_paths = [p for p in dict.fromkeys(local_paths) if p and os.path.exists(p)]
         if not local_paths or not self._connected():
             return
 
-        dest_dir = self._dest_dir()
+        dest_dir = (dest_dir or self._dest_dir()).rstrip('/') or '/'
         if sync:
             self._sync_paths(local_paths, dest_dir)
             return
@@ -597,10 +605,10 @@ class TransferActionsMixin:
         if folder:
             self.upload_paths([folder], sync=True)
 
-    def handle_drop_event(self, event):
+    def handle_drop_event(self, event, dest_dir=None):
         paths = [u.toLocalFile() for u in event.mimeData().urls() if u.isLocalFile()]
         if paths:
-            self.upload_paths(paths)
+            self.upload_paths(paths, dest_dir=dest_dir)
 
     # ------------------------------------------------------------ device to PC
 
@@ -685,11 +693,11 @@ class TransferActionsMixin:
     def is_dir_for_path(self, path):
         return self._is_dir_of_name(path.rstrip('/').split('/')[-1])
 
-    def selection_size(self):
+    def selection_size(self, timeout=20):
         """Bytes in the current selection, or None if a folder cannot be measured."""
         total = 0
         folders = []
-        for index in self.tree_view.selectionModel().selectedRows():
+        for index in self.selected_rows():
             name = self.tree_model.data(index.siblingAtColumn(0))
             if not name or name == "..":
                 continue
@@ -698,52 +706,51 @@ class TransferActionsMixin:
             else:
                 total += self.get_file_size_from_row(index.row())
         if folders:
-            measured = self.adb_handler.disk_usage_many(folders)
+            measured = self.adb_handler.disk_usage_many(folders, timeout=timeout)
             if measured is None:
                 return None
             total += measured
         return total
 
     def drag_out_payload(self):
-        """Fetch the selection so it can be dropped on the PC.
+        """Fetch the selection so the drag can also be dropped on the PC.
 
-        Called only for an explicit drag-to-PC gesture, because the files have
-        to be on disk before the drag starts and the pull blocks the window.
+        This runs as a drag begins, so it must be quick and silent: the files
+        have to be on disk before the drag starts. A selection small enough is
+        fetched, and anything larger simply drags within the app while the
+        status bar says which command to use instead.
         """
         names = self._selected_names()
-        if not names or not self._connected():
+        if not names or not self.adb_handler.device_connected:
             return None
 
-        size = self.selection_size()
-        if size is None:
-            if not self._confirm(
-                    "Unknown Size",
-                    "The size of this selection could not be measured.\n\n"
-                    "Fetching it for the drag may take a while and cannot be "
-                    "cancelled. Continue?"):
-                return None
-        elif size > transfer.DRAG_OUT_SIZE_LIMIT:
-            limit_mb = transfer.DRAG_OUT_SIZE_LIMIT // (1024 * 1024)
-            self._note(f"Selection is larger than {limit_mb} MB - "
-                       f"use Download to PC (Ctrl+E)")
+        size = self.selection_size(timeout=5)
+        limit_mb = transfer.DRAG_OUT_SIZE_LIMIT // (1024 * 1024)
+        if size is None or size > transfer.DRAG_OUT_SIZE_LIMIT:
+            measured = "too large" if size else "an unknown size"
+            self._note(f"Dragging to the PC is limited to {limit_mb} MB and this "
+                       f"selection is {measured} - use \u2193 To PC (Ctrl+E)")
             return None
 
         target = transfer.temp_transfer_dir(self.device_serial, clear=True)
-        self._note("Fetching the selection for the drag...")
         if not self.adb_handler.pull_items([self._remote_path(n) for n in names], target):
             self._report_error("Could not prepare the drag")
             return None
 
         local = [p for p in (os.path.join(target, n) for n in names) if os.path.exists(p)]
-        self._note(f"Dragging {len(local)} item(s) - drop them anywhere on the PC")
+        if local:
+            self._note(f"Dragging {len(local)} item(s) - drop them in a panel, "
+                       f"or anywhere on the PC")
         return local
 
     def hint_drag_to_pc(self):
-        """Mention the drag-to-PC gesture once per panel."""
+        """Kept for callers that only want the tip, without fetching anything."""
         if getattr(self, '_drag_hint_shown', False):
             return
         self._drag_hint_shown = True
-        self._note("Tip: hold Alt while dragging to drop files on the PC")
+        limit_mb = transfer.DRAG_OUT_SIZE_LIMIT // (1024 * 1024)
+        self._note(f"Drag items anywhere on the PC (up to {limit_mb} MB), or use "
+                   f"\u2193 To PC for more")
 
     # -------------------------------------------------------- device to device
 

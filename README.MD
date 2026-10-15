@@ -20,6 +20,25 @@ A graphical file manager for Android devices connected via ADB (Android Debug Br
 - **App Installer** - Install APK or XAPK files
 - **Wireless ADB** - Connect to devices over network (no USB required)
 
+## Selecting and the right-click menu
+Selection behaves as it does in a file manager, in every view: click,
+`Ctrl`+click to add, `Shift`+click for a range, a rubber band dragged over
+empty space, `Ctrl+A` for everything and `Ctrl+I` to invert. The status bar
+reports what is selected and how large it is, and `..` is never part of it.
+
+The right-click menu follows what is under the cursor:
+
+- **empty space** - View, Sort by, Refresh, New, Upload from PC, Select all,
+  Copy folder path, Properties
+- **one item** - Open (a folder here, a file on the PC), Download to PC, Copy
+  to PC clipboard, Send to device, Copy/Cut/Duplicate, Copy or Move to
+  folder, Rename, Delete, Copy path, Properties
+- **several items** - the same, with Batch rename in place of Rename
+
+Right-clicking an item outside the current selection moves the selection to
+it first, so the menu always acts on what was clicked. Columns in Details
+sort when their header is clicked, and the sort choice is remembered.
+
 ## Looking at files
 The app is dark by default; View > Dark Mode switches it and the choice is
 kept in `config.ini` beside the program.
@@ -81,10 +100,10 @@ read, the transfer stops instead of assuming the folder is empty.
 - Select what you want and press **↓ To PC** in the panel's toolbar, which
   asks where to put it. This is the same as `Ctrl+E` and as right-click >
   Download to PC, and it handles folders as well as files.
-- Hold `Alt` and drag items out onto the desktop, Explorer or any app that
-  takes files. The files must be fetched before the drag can start, so this is
-  limited to selections under 24 MB and only happens when `Alt` is held - a
-  drag between panels stays instant and costs no adb calls.
+- Drag items out onto the desktop, Explorer or any app that takes files. The
+  files have to be on disk before a drag can start, so a selection under
+  24 MB is fetched as the drag begins; a larger one still drags between
+  panels, and the status bar points at "To PC" instead.
 - `Ctrl+Shift+C` puts the selection on the PC clipboard, then paste in Explorer
 - `Ctrl+E` or right-click > Download to PC for a chosen folder (any size)
 - Double-click a file to open it on the PC
@@ -112,7 +131,7 @@ failed and why, rather than reporting success.
 | Shortcut | Action |
 | --- | --- |
 | `Ctrl+C` / `Ctrl+X` / `Ctrl+V` | Copy / Cut / Paste (device items, or files copied on the PC) |
-| `Alt`+drag | Drag the selection out to the PC |
+| `Ctrl+A` / `Ctrl+I` | Select all / Invert the selection |
 | `Ctrl+Shift+C` | Copy the selection to the PC clipboard |
 | `Ctrl+Shift+V` | Paste files from the PC clipboard |
 | `Ctrl+Shift+P` | Copy the full device path as text |

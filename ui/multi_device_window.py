@@ -349,8 +349,9 @@ class MultiDeviceWindow(QMainWindow):
     def _broadcast_rename(self):
         p = self._active_panel()
         if p:
-            if len(p.tree_view.selectionModel().selectedRows()) == 1:
-                name = p.tree_model.data(p.tree_model.index(p.tree_view.selectionModel().selectedRows()[0].row(), 0))
+            rows = p.selected_rows()
+            if len(rows) == 1:
+                name = p.tree_model.data(p.tree_model.index(rows[0].row(), 0))
                 if name and name != "..":
                     p.rename_item(name)
 

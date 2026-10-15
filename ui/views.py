@@ -10,7 +10,8 @@ from PyQt6.QtWidgets import (
     QStyledItemDelegate, QStyleOptionViewItem, QTreeView,
 )
 from PyQt6.QtCore import QMimeData, QSize, Qt, QUrl
-from PyQt6.QtGui import QColor, QDrag, QFontMetrics, QGuiApplication, QIcon
+from PyQt6.QtGui import (QColor, QDrag, QFontMetrics, QGuiApplication, QIcon,
+                         QPainter, QPixmap)
 
 ADB_MIME = "application/x-adb-paths"
 
@@ -113,7 +114,9 @@ class DropMixin:
         md = event.mimeData()
 
         if md.hasUrls() and not event.source():
-            self.main_window.handle_drop_event(event)
+            # Dropping onto a folder row puts the files in that folder, as it
+            # would in a file manager.
+            self.main_window.handle_drop_event(event, self._get_drop_destination(event))
             event.acceptProposedAction()
             return
 
@@ -145,6 +148,26 @@ class DropMixin:
             return
 
         event.ignore()
+
+    def _drag_pixmap(self, indexes):
+        """What the cursor carries: the first icon, with a count beside it."""
+        size = max(32, min(self.iconSize().width(), 64))
+        pixmap = QPixmap(size + 54, size + 8)
+        pixmap.fill(Qt.GlobalColor.transparent)
+
+        painter = QPainter(pixmap)
+        icon = self.model().data(indexes[0].siblingAtColumn(0),
+                                 Qt.ItemDataRole.DecorationRole)
+        if icon is not None and not icon.isNull():
+            painter.drawPixmap(4, 4, icon.pixmap(size, size))
+        if len(indexes) > 1:
+            badge = f"{len(indexes)}"
+            painter.setPen(self.palette().highlightedText().color())
+            painter.fillRect(size + 8, size // 2 - 10, 40, 20,
+                             self.palette().highlight())
+            painter.drawText(size + 14, size // 2 + 5, badge)
+        painter.end()
+        return pixmap
 
     def _get_drop_destination(self, event):
         dest = self.main_window.current_path
@@ -179,6 +202,19 @@ class DropMixin:
         QMessageBox.warning(self, "Cross-Device Drop",
                             "Cross-device streaming not available from this view.")
 
+    def selected_rows(self):
+        """Selected rows, however the view happens to report them."""
+        model = self.selectionModel()
+        if model is None:
+            return []
+        rows = model.selectedRows()
+        if rows:
+            return rows
+        seen = {}
+        for index in model.selectedIndexes():
+            seen.setdefault(index.row(), index.siblingAtColumn(0))
+        return [seen[row] for row in sorted(seen)]
+
     def _source_panel(self, serial):
         for panel in getattr(self.window(), 'device_panels', []):
             if panel.device_serial == serial:
@@ -186,7 +222,7 @@ class DropMixin:
         return None
 
     def startDrag(self, supportedActions):
-        indexes = self.selectionModel().selectedRows() or self.selectionModel().selectedIndexes()
+        indexes = self.selected_rows()
         if not indexes:
             return
 
@@ -204,18 +240,17 @@ class DropMixin:
         md.setData(ADB_MIME, "\n".join([serial] + paths).encode("utf-8"))
 
         # Real file URLs are what let a selection be dropped on the desktop or
-        # in Explorer, but they only exist once the files have been pulled, and
-        # that pull blocks the window. So it happens only for an explicit
-        # Alt-drag; a drag between panels stays instant and costs no adb calls.
-        if QGuiApplication.keyboardModifiers() & Qt.KeyboardModifier.AltModifier:
-            local_paths = self.main_window.drag_out_payload()
-            if local_paths:
-                md.setUrls([QUrl.fromLocalFile(p) for p in local_paths])
-        else:
-            self.main_window.hint_drag_to_pc()
+        # in Explorer, and they only exist once the files have been fetched.
+        # Small selections are fetched here so dragging out simply works;
+        # a large one would stall the drag, so it keeps the internal format
+        # only and the panel says what to use instead.
+        local_paths = self.main_window.drag_out_payload()
+        if local_paths:
+            md.setUrls([QUrl.fromLocalFile(p) for p in local_paths])
 
         drag = QDrag(self)
         drag.setMimeData(md)
+        drag.setPixmap(self._drag_pixmap(indexes))
         # Always a copy as far as the drag protocol is concerned; whether an
         # internal drop moves or copies is decided from the modifier keys.
         drag.exec(Qt.DropAction.CopyAction)
@@ -319,6 +354,13 @@ class FileListView(DropMixin, QListView):
         self.setMovement(QListView.Movement.Static)
         self.setResizeMode(QListView.ResizeMode.Adjust)
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        # A list view shows one column, so by default a click selects a cell
+        # rather than a row and selectedRows() comes back empty - which left
+        # every action that works on the selection doing nothing here.
+        self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        # Dragging from empty space draws a selection rectangle, as in a file
+        # manager; dragging from an item still starts a drag.
+        self.setSelectionRectVisible(True)
         self.setUniformItemSizes(False)
         self.setWordWrap(True)
         self.setTextElideMode(Qt.TextElideMode.ElideRight)

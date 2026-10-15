@@ -14,7 +14,8 @@ from PyQt6.QtGui import (QStandardItemModel, QStandardItem, QAction, QKeySequenc
                          QShortcut, QIcon)
 from PyQt6.QtCore import QStringListModel
 from PyQt6.QtWidgets import QCompleter
-from PyQt6.QtCore import Qt, QTimer, QFileInfo, pyqtSignal, QPoint, QEvent
+from PyQt6.QtCore import (Qt, QTimer, QFileInfo, pyqtSignal, QPoint, QEvent,
+                          QItemSelectionModel)
 
 from PyQt6.QtGui import QGuiApplication
 
@@ -81,6 +82,8 @@ class DevicePanel(TransferActionsMixin, QWidget):
         self._last_download_dir = None
         self._post_refresh_note = None
         self._drag_hint_shown = False
+        self.sort_key = 'name'
+        self.sort_desc = False
         self._items_by_name = {}
         self._thumb_keys = {}
         self._thumb_generation = 0
@@ -116,6 +119,9 @@ class DevicePanel(TransferActionsMixin, QWidget):
         self._setup_ui()
         self._setup_context_menu()
         self._restore_view_mode()
+        self.sort_key = self._settings().value("sort_key", "name", type=str)
+        self.sort_desc = self._settings().value("sort_desc", False, type=bool)
+        self._update_sort_indicator()
         self.update_path_display()
 
     @property
@@ -248,6 +254,9 @@ class DevicePanel(TransferActionsMixin, QWidget):
             view.customContextMenuRequested.connect(self.show_context_menu)
             view.viewport().installEventFilter(self)
             view.verticalScrollBar().valueChanged.connect(self._schedule_thumbnails)
+
+        header.setSectionsClickable(True)
+        header.sectionClicked.connect(self._header_clicked)
 
         self._setup_shortcuts()
         layout.addWidget(self._view_stack)
@@ -441,6 +450,8 @@ class DevicePanel(TransferActionsMixin, QWidget):
             (QKeySequence(Qt.Key.Key_F2), self._shortcut_rename),
             (QKeySequence(Qt.Key.Key_F5), self.refresh_files),
             (QKeySequence(Qt.Key.Key_Backspace), self.go_up),
+            (QKeySequence.StandardKey.SelectAll, self.select_all_items),
+            (QKeySequence("Ctrl+I"), self.invert_selection),
         ) + tuple(
             (QKeySequence(f"Ctrl+{number}"), lambda m=mode: self.set_view_mode(m))
             for number, (mode, _, _) in enumerate(views.VIEW_MODES, start=1)
@@ -491,15 +502,35 @@ class DevicePanel(TransferActionsMixin, QWidget):
     
 
     def _selection_changed(self, *args):
-        """Keep the status line telling the user what they can do next."""
+        """Report the selection the way a file manager's status bar does."""
         if self._closing:
             return
         names = self._selected_names()
+        self.to_pc_btn.setEnabled(bool(names))
+        self.to_pc_btn.setToolTip(
+            "Download the selected files and folders to this PC (Ctrl+E)" if names
+            else "Select files or folders first, then download them here (Ctrl+E)")
+
         if not names:
-            self.to_pc_btn.setEnabled(True)
+            total = len(self.all_files or [])
+            self._note(f"{total} items")
             return
-        self._note(f"{len(names)} selected - \u2193 To PC, Ctrl+C to copy, "
-                   f"or right-click for more")
+
+        chosen = [self._items_by_name.get(n) for n in names]
+        files = [c for c in chosen if c and not c['is_dir']]
+        folders = [c for c in chosen if c and c['is_dir']]
+        size = sum(c['size'] for c in files)
+
+        parts = []
+        if folders:
+            parts.append(f"{len(folders)} folder{'s' if len(folders) > 1 else ''}")
+        if files:
+            parts.append(f"{len(files)} file{'s' if len(files) > 1 else ''}")
+        summary = " and ".join(parts) if parts else f"{len(names)} items"
+        if size:
+            summary += f"  -  {self.format_size(size)}"
+        self._note(f"{summary} selected  -  \u2193 To PC, Ctrl+C to copy, "
+                   f"right-click for more")
 
     def _on_host_clipboard_changed(self):
         """Remember when the PC clipboard last changed, so Ctrl+V can choose
@@ -632,9 +663,7 @@ class DevicePanel(TransferActionsMixin, QWidget):
             self.tree_model.appendRow([parent_item, QStandardItem("Directory"),
                                        QStandardItem(""), QStandardItem(""), QStandardItem("")])
 
-        dirs = sorted([f for f in files if f.is_dir], key=lambda x: x.name.lower())
-        regular_files = sorted([f for f in files if not f.is_dir], key=lambda x: x.name.lower())
-        for file_item in dirs + regular_files:
+        for file_item in self._sorted(files):
             name_item = QStandardItem(file_item.name)
             if file_item.is_dir:
                 name_item.setIcon(self._folder_icon)
@@ -664,6 +693,80 @@ class DevicePanel(TransferActionsMixin, QWidget):
         self.path_display.update_completions(files)
         self._schedule_thumbnails(immediate=True)
 
+    # ------------------------------------------------------------ sorting --
+
+    SORT_COLUMNS = {0: 'name', 1: 'type', 2: 'size', 4: 'date'}
+    SORT_LABELS = (('name', 'Name'), ('size', 'Size'), ('type', 'Type'),
+                   ('date', 'Date modified'))
+
+    def _sorted(self, files):
+        """Folders first, then whichever order the user asked for."""
+        def key(item):
+            if self.sort_key == 'size':
+                return (0 if item.is_dir else 1, item.size, item.name.lower())
+            if self.sort_key == 'date':
+                return (0 if item.is_dir else 1, item.date_modified, item.name.lower())
+            if self.sort_key == 'type':
+                extension = os.path.splitext(item.name)[1].lower()
+                return (0 if item.is_dir else 1, extension, item.name.lower())
+            return (0 if item.is_dir else 1, item.name.lower())
+
+        folders = sorted([f for f in files if f.is_dir], key=key,
+                         reverse=self.sort_desc)
+        rest = sorted([f for f in files if not f.is_dir], key=key,
+                      reverse=self.sort_desc)
+        return folders + rest
+
+    def set_sort(self, key, descending=None):
+        if descending is None:
+            descending = (not self.sort_desc) if key == self.sort_key else False
+        self.sort_key, self.sort_desc = key, descending
+        self._settings().setValue("sort_key", key)
+        self._settings().setValue("sort_desc", descending)
+        self._update_sort_indicator()
+        if self.all_files:
+            self.apply_search_filter()
+
+    def _update_sort_indicator(self):
+        header = self._tree.header()
+        column = next((c for c, k in self.SORT_COLUMNS.items() if k == self.sort_key), 0)
+        header.setSortIndicator(
+            column,
+            Qt.SortOrder.DescendingOrder if self.sort_desc else Qt.SortOrder.AscendingOrder)
+        header.setSortIndicatorShown(True)
+
+    def _header_clicked(self, column):
+        key = self.SORT_COLUMNS.get(column)
+        if key:
+            self.set_sort(key)
+
+    # ---------------------------------------------------------- selection --
+
+    def select_all_items(self):
+        view = self.tree_view
+        view.selectAll()
+        self._drop_parent_row_from_selection()
+
+    def invert_selection(self):
+        model = self.tree_view.selectionModel()
+        chosen = {index.row() for index in self.selected_rows()}
+        model.clearSelection()
+        flags = (QItemSelectionModel.SelectionFlag.Select
+                 | QItemSelectionModel.SelectionFlag.Rows)
+        for row in range(self.tree_model.rowCount()):
+            if row not in chosen:
+                model.select(self.tree_model.index(row, 0), flags)
+        self._drop_parent_row_from_selection()
+
+    def _drop_parent_row_from_selection(self):
+        """".." is navigation, so never leave it selected."""
+        model = self.tree_view.selectionModel()
+        for index in list(self.selected_rows()):
+            if self.tree_model.data(index.siblingAtColumn(0)) == "..":
+                model.select(index,
+                             QItemSelectionModel.SelectionFlag.Deselect
+                             | QItemSelectionModel.SelectionFlag.Rows)
+
     def handle_double_click(self, index):
         name_index = self.tree_model.index(index.row(), 0)
         type_index = self.tree_model.index(index.row(), 1)
@@ -691,7 +794,7 @@ class DevicePanel(TransferActionsMixin, QWidget):
 
     def get_selected_items(self):
         selected_items = []
-        for index in self.tree_view.selectionModel().selectedRows():
+        for index in self.selected_rows():
             name = self.tree_model.itemFromIndex(index.siblingAtColumn(0)).text()
             item_type = self.tree_model.itemFromIndex(index.siblingAtColumn(1)).text()
             if not name or name == "..":
@@ -708,96 +811,171 @@ class DevicePanel(TransferActionsMixin, QWidget):
 
 
     def show_context_menu(self, position):
+        """An Explorer-style menu: what it offers follows what is selected."""
         index = self.tree_view.indexAt(position)
-        if not index.isValid():
-            self.tree_view.clearSelection()
-            indexes = []
-        else:
-            indexes = self.tree_view.selectionModel().selectedRows()
-        menu = QMenu()
 
+        if index.isValid():
+            # Right-clicking outside the selection moves the selection there,
+            # so the menu always acts on what is under the cursor.
+            if index.row() not in {i.row() for i in self.selected_rows()}:
+                self.tree_view.selectionModel().select(
+                    index,
+                    QItemSelectionModel.SelectionFlag.ClearAndSelect
+                    | QItemSelectionModel.SelectionFlag.Rows)
+        else:
+            self.tree_view.clearSelection()
+
+        names = self._selected_names()
+        menu = QMenu(self)
+
+        if not names:
+            self._build_background_menu(menu)
+        else:
+            self._build_selection_menu(menu, names)
+
+        menu.exec(self.tree_view.viewport().mapToGlobal(position))
+
+    def _add_paste_entries(self, menu):
+        """Paste from another panel, or from the PC - whichever is waiting."""
         clip, _, clip_panel = self._panel_clipboard()
         host_files = transfer.host_clipboard_files()
+        added = False
+
         if clip and clip.get('items'):
             label = "Paste" if clip.get('operation') == 'copy' else "Paste (move)"
             if clip_panel is not self:
                 label = f"{label} from {clip_panel.device_name}"
             menu.addAction(f"{label}	Ctrl+V", self.paste_items)
+            added = True
         if host_files:
-            menu.addAction(f"Paste {len(host_files)} file(s) from PC	Ctrl+Shift+V",
-                           self.paste_from_pc)
-        if (clip and clip.get('items')) or host_files:
-            menu.addSeparator()
+            count = len(host_files)
+            menu.addAction(f"Paste {count} item(s) from PC	Ctrl+Shift+V", self.paste_from_pc)
+            added = True
+        return added
 
-        if not indexes:
-            menu.addAction("New File", self.create_new_file)
-            menu.addAction("New Folder", self.create_new_folder)
-            menu.addSeparator()
-            menu.addAction("Upload Files...	Ctrl+U", self.upload_file_to_device)
-            menu.addAction("Upload Folder...", self.upload_folder_to_device)
-            menu.addAction("Sync Folder (skip unchanged)...", self.sync_folder_to_device)
-            menu.addSeparator()
-            menu.addAction("Copy Folder Path	Ctrl+Shift+P", self.copy_paths_to_clipboard)
-        elif len(indexes) > 1:
-            menu.addAction("Copy	Ctrl+C", self.copy_selected)
-            menu.addAction("Cut	Ctrl+X", self.cut_selected)
-            menu.addAction("Duplicate	Ctrl+D", self.duplicate_selected)
-            menu.addSeparator()
-            menu.addAction("Download to PC...	Ctrl+E", self.download_selected_items)
-            menu.addAction("Copy to PC Clipboard	Ctrl+Shift+C", self.copy_to_pc_clipboard)
-            menu.addAction("Copy Paths	Ctrl+Shift+P", self.copy_paths_to_clipboard)
-            menu.addSeparator()
-            menu.addAction("Copy to Device Folder...", self.copy_selected_to)
-            menu.addAction("Move to Device Folder...", self.move_selected_to)
-            menu.addAction("Batch Rename...", self.batch_rename_selected)
-            menu.addAction("Delete Selected", self.delete_selected_items)
-            total_size = sum(
-                self.get_file_size_from_row(idx.row())
-                for idx in indexes
-                if not self.is_dir_from_row(idx.row())
-            )
-            menu.addSeparator()
-            sz_lbl = menu.addAction(f"Total Size: {self.format_size(total_size)}")
-            sz_lbl.setEnabled(False)
-        else:
-            idx = indexes[0]
-            item_name = self.tree_model.data(self.tree_model.index(idx.row(), 0))
-            item_type = self.tree_model.data(self.tree_model.index(idx.row(), 1))
+    def _build_background_menu(self, menu):
+        """The menu for empty space: about this folder and this view."""
+        view_menu = menu.addMenu("View")
+        for number, (mode, label, _) in enumerate(views.VIEW_MODES, start=1):
+            action = view_menu.addAction(f"{label}	Ctrl+{number}")
+            action.setCheckable(True)
+            action.setChecked(mode == self.view_mode)
+            action.triggered.connect(lambda checked=False, m=mode: self.set_view_mode(m))
 
-            menu.addAction("Copy	Ctrl+C", self.copy_selected)
-            menu.addAction("Cut	Ctrl+X", self.cut_selected)
-            menu.addAction("Duplicate	Ctrl+D", self.duplicate_selected)
-            menu.addSeparator()
-            menu.addAction("Copy to PC Clipboard	Ctrl+Shift+C", self.copy_to_pc_clipboard)
-            menu.addAction("Copy Path	Ctrl+Shift+P", self.copy_paths_to_clipboard)
-            menu.addSeparator()
+        sort_menu = menu.addMenu("Sort by")
+        for key, label in self.SORT_LABELS:
+            action = sort_menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(key == self.sort_key)
+            action.triggered.connect(lambda checked=False, k=key: self.set_sort(k))
+        sort_menu.addSeparator()
+        for descending, label in ((False, "Ascending"), (True, "Descending")):
+            action = sort_menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(descending == self.sort_desc)
+            action.triggered.connect(
+                lambda checked=False, d=descending: self.set_sort(self.sort_key, d))
 
-            if item_type == "File":
-                menu.addAction("Open", lambda n=item_name: self.open_file_on_host(n))
-                menu.addAction("Save to PC...", lambda n=item_name: self.copy_file_to(n))
-                menu.addAction("Download to PC...	Ctrl+E", self.download_selected_items)
-                menu.addSeparator()
-                menu.addAction("Copy to Device Folder...", self.copy_selected_to)
-                menu.addAction("Move to Device Folder...", self.move_selected_to)
-                menu.addSeparator()
-                menu.addAction("Rename	F2", lambda n=item_name: self.rename_item(n))
-                menu.addAction("Delete	Del", lambda n=item_name: self.delete_item(n, is_dir=False))
-            elif item_type == "Directory":
-                menu.addAction("Save to PC...", lambda n=item_name: self.copy_folder_to(n))
-                menu.addAction("Download to PC...	Ctrl+E", self.download_selected_items)
-                menu.addSeparator()
-                menu.addAction("Copy to Device Folder...", self.copy_selected_to)
-                menu.addAction("Move to Device Folder...", self.move_selected_to)
-                menu.addSeparator()
-                menu.addAction("Rename	F2", lambda n=item_name: self.rename_item(n))
-                menu.addAction("Delete	Del", lambda n=item_name: self.delete_item(n, is_dir=True))
-
-        
+        menu.addAction(f"Refresh	F5", self.refresh_files)
         menu.addSeparator()
-        send_menu = menu.addMenu("Send to Device...")
-        self._populate_send_to_menu(send_menu, indexes, position)
 
-        menu.exec(self.tree_view.viewport().mapToGlobal(position))
+        if self._add_paste_entries(menu):
+            menu.addSeparator()
+
+        new_menu = menu.addMenu("New")
+        new_menu.addAction("Folder", self.create_new_folder)
+        new_menu.addAction("File", self.create_new_file)
+
+        upload_menu = menu.addMenu("Upload from PC")
+        upload_menu.addAction(f"Files...	Ctrl+U", self.upload_file_to_device)
+        upload_menu.addAction("Folder...", self.upload_folder_to_device)
+        upload_menu.addAction("Sync folder (skip unchanged)...", self.sync_folder_to_device)
+
+        menu.addSeparator()
+        menu.addAction(f"Select all	Ctrl+A", self.select_all_items)
+        menu.addAction(f"Copy folder path	Ctrl+Shift+P", self.copy_paths_to_clipboard)
+        menu.addSeparator()
+        menu.addAction("Properties", self.show_properties)
+
+    def _build_selection_menu(self, menu, names):
+        """The menu for one or more selected items."""
+        single = len(names) == 1
+        name = names[0] if single else None
+        item = self._items_by_name.get(name) if single else None
+        is_dir = bool(item and item['is_dir'])
+
+        if single:
+            if is_dir:
+                menu.addAction("Open", lambda n=name: self.navigate_to_child(n))
+            else:
+                menu.addAction("Open on PC", lambda n=name: self.open_file_on_host(n))
+            menu.addSeparator()
+
+        menu.addAction(f"Download to PC...	Ctrl+E", self.download_selected_items)
+        menu.addAction(f"Copy to PC clipboard	Ctrl+Shift+C", self.copy_to_pc_clipboard)
+        send_menu = menu.addMenu("Send to device")
+        self._populate_send_to_menu(send_menu, self.selected_rows(), None)
+        menu.addSeparator()
+
+        menu.addAction(f"Copy	Ctrl+C", self.copy_selected)
+        menu.addAction(f"Cut	Ctrl+X", self.cut_selected)
+        if self._add_paste_entries(menu):
+            pass
+        menu.addAction(f"Duplicate	Ctrl+D", self.duplicate_selected)
+        menu.addSeparator()
+
+        menu.addAction("Copy to folder...", self.copy_selected_to)
+        menu.addAction("Move to folder...", self.move_selected_to)
+        menu.addSeparator()
+
+        if single:
+            menu.addAction(f"Rename	F2", lambda n=name: self.rename_item(n))
+        else:
+            menu.addAction("Batch rename...", self.batch_rename_selected)
+        menu.addAction(f"Delete	Del", self.delete_selected_items)
+        menu.addSeparator()
+
+        menu.addAction(f"Copy path	Ctrl+Shift+P", self.copy_paths_to_clipboard)
+        menu.addAction("Properties", self.show_properties)
+
+    def navigate_to_child(self, name):
+        self.current_path = f"{self.current_path.rstrip('/')}/{name}"
+        self.path_history.append(self.current_path)
+        self.clear_search_on_navigation()
+        self.update_path_display()
+        self.refresh_files()
+
+    def show_properties(self):
+        """Counts, total size and the path - what Explorer shows."""
+        names = self._selected_names()
+        if names:
+            chosen = [self._items_by_name.get(n) for n in names]
+            chosen = [c for c in chosen if c]
+            folders = [c for c in chosen if c['is_dir']]
+            files = [c for c in chosen if not c['is_dir']]
+            title = chosen[0]['name'] if len(chosen) == 1 else f"{len(chosen)} items"
+            lines = [f"Location: {self._dest_dir()}"]
+            if len(chosen) == 1:
+                lines.append(f"Type: {'Folder' if chosen[0]['is_dir'] else 'File'}")
+                lines.append(f"Modified: {chosen[0]['modified']}")
+            if files:
+                lines.append(f"Files: {len(files)}  ({self.format_size(sum(c['size'] for c in files))})")
+            if folders:
+                lines.append(f"Folders: {len(folders)}")
+                measured = self.adb_handler.disk_usage_many([c['path'] for c in folders])
+                lines.append("Folder contents: "
+                             + (self.format_size(measured) if measured is not None
+                                else "could not be measured"))
+        else:
+            listing = self.all_files or []
+            title = self._dest_dir()
+            files = [f for f in listing if not f.is_dir]
+            folders = [f for f in listing if f.is_dir]
+            lines = [f"Path: {self._dest_dir()}",
+                     f"Files: {len(files)}  ({self.format_size(sum(f.size for f in files))})",
+                     f"Folders: {len(folders)}"]
+
+        QMessageBox.information(self, title, "\n".join(lines))
 
 
     def get_file_size_from_row(self, row):
@@ -903,12 +1081,12 @@ class DevicePanel(TransferActionsMixin, QWidget):
                 self._report_error("Delete failed")
 
     def _shortcut_delete(self):
-        indexes = self.tree_view.selectionModel().selectedRows()
+        indexes = self.selected_rows()
         if indexes:
             self.delete_selected_items()
 
     def _shortcut_rename(self):
-        indexes = self.tree_view.selectionModel().selectedRows()
+        indexes = self.selected_rows()
         if len(indexes) != 1:
             return
         name = self.tree_model.data(self.tree_model.index(indexes[0].row(), 0))
@@ -919,7 +1097,7 @@ class DevicePanel(TransferActionsMixin, QWidget):
     def delete_selected_items(self):
         if not self.adb_handler.device_connected:
             return
-        indexes = self.tree_view.selectionModel().selectedRows()
+        indexes = self.selected_rows()
         if not indexes:
             return
         names_types = []
@@ -981,7 +1159,7 @@ class DevicePanel(TransferActionsMixin, QWidget):
     def batch_rename_selected(self):
         if not self.adb_handler.device_connected:
             return
-        indexes = self.tree_view.selectionModel().selectedRows()
+        indexes = self.selected_rows()
         if len(indexes) < 2:
             QMessageBox.information(self, "Info", "Select 2+ items to batch rename.")
             return

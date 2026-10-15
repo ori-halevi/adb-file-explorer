@@ -323,24 +323,41 @@ check("clipboard timestamp was reset", panel._clipboard_time == 0.0)
 check("the file moved", names_at(f"{BASE}/into") == ["cutme.txt"], str(names_at(f"{BASE}/into")))
 check("the source copy is gone", "cutme.txt" not in (names_at(BASE) or []))
 
-print("\n=== 13. a plain drag makes no adb calls ===")
+print("\n=== 13. a drag carries real files when the selection is small ===")
 goto(BASE)
 select("into")
-calls = []
-real_pull = h.pull_items
-real_du = h.disk_usage_many
-h.pull_items = lambda *a, **k: calls.append('pull') or True
-h.disk_usage_many = lambda *a, **k: calls.append('du') or 0
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QDrag
+
+dragged = {}
 real_exec = QDrag.exec
-QDrag.exec = lambda self, *a, **k: Qt.DropAction.IgnoreAction
+
+
+def capture_drag(self, *args, **kwargs):
+    mime = self.mimeData()
+    dragged['urls'] = [u.toLocalFile() for u in mime.urls()]
+    dragged['adb'] = mime.hasFormat('application/x-adb-paths')
+    return Qt.DropAction.IgnoreAction
+
+
+QDrag.exec = capture_drag
 panel.tree_view.startDrag(Qt.DropAction.CopyAction)
+check("the drag offers the item to other apps on the PC",
+      bool(dragged.get('urls')), str(dragged.get('urls')))
+check("and still carries the internal format for panel-to-panel drops",
+      dragged.get('adb') is True)
+
+# a selection past the limit must not stall the drag while it is fetched
+dragged.clear()
+real_size = panel.selection_size
+panel.selection_size = lambda timeout=20: transfer.DRAG_OUT_SIZE_LIMIT + 1
+panel.tree_view.startDrag(Qt.DropAction.CopyAction)
+panel.selection_size = real_size
 QDrag.exec = real_exec
-h.pull_items, h.disk_usage_many = real_pull, real_du
-check("no pull or du for an in-app drag", calls == [], str(calls))
-check("the drag-to-PC hint was shown", "Alt" in panel.status_label.text(),
-      panel.status_label.text())
+check("a large selection is not fetched for the drag", not dragged.get('urls'),
+      str(dragged.get('urls')))
+check("and the panel says what to use instead",
+      "To PC" in panel.status_label.text(), panel.status_label.text())
 
 print("\n=== 14. '..' is never treated as a selectable item ===")
 goto(f"{BASE}/into")

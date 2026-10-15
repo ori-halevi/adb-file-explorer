@@ -30,7 +30,8 @@ work here:
 | Drag to another device, or to the PC | **Copy** - a different storage |
 | `Ctrl` + drag | Copy, wherever it is dropped |
 | `Shift` + drag | Move, wherever it is dropped |
-| Drag with the **right button** | A menu on release: Copy here, Move here, Cancel - the action that would have happened is in bold |
+| Drag with the **right button**, from something already selected | A menu on release: Copy here, Move here, Cancel - the action that would have happened is in bold |
+| Drag with the **right button**, from anywhere else | Sweeps out a selection, which is how several items get picked in the first place |
 
 The cursor shows which it will be while you drag, because the panel accepts
 the drag with that action and the system draws the matching cursor.

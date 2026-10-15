@@ -266,12 +266,11 @@ check("an icon view reports selected rows",
       hasattr(list_view, 'selected_rows'))
 
 print("\n=== 8. the two buttons start two different gestures ===")
-# The right button opens a menu on release; the left one copies or moves.
-# Earlier the right-drag carried whatever had been selected before, because
-# grabbing an item did not select it first.
-from PyQt6.QtCore import QEvent
+# The left button drags. The right button drags only what is already
+# selected, and anywhere else it keeps its other job - sweeping out a
+# selection - which is how several items get picked in the first place.
+from PyQt6.QtCore import QEvent, QItemSelectionModel
 from PyQt6.QtGui import QMouseEvent
-from PyQt6.QtCore import QItemSelectionModel
 
 started = []
 view.startDrag = lambda actions, right_button=False: started.append(
@@ -299,33 +298,50 @@ def release(button, point):
     view.mouseReleaseEvent(event)
 
 
+def select_rows(*rows):
+    selection = view.selectionModel()
+    selection.clearSelection()
+    for row in rows:
+        selection.select(model.index(row, 0),
+                         QItemSelectionModel.SelectionFlag.Select
+                         | QItemSelectionModel.SelectionFlag.Rows)
+    app.processEvents()
+
+
 row_one = view.visualRect(model.index(1, 0)).center()
 row_two = view.visualRect(model.index(2, 0)).center()
 
-# start from a selection that is deliberately the wrong one
-view.selectionModel().select(
-    model.index(1, 0),
-    QItemSelectionModel.SelectionFlag.ClearAndSelect | QItemSelectionModel.SelectionFlag.Rows)
-
 started.clear()
-press(Qt.MouseButton.RightButton, row_two)
-check("right-pressing an unselected item selects it",
-      [model.data(i) for i in view.selected_rows()] == ["b.jpg"],
-      str([model.data(i) for i in view.selected_rows()]))
-
-move(Qt.MouseButton.RightButton, row_two + QPoint(60, 60))
-check("a right-drag starts the asking kind of drag",
+select_rows(1, 2)
+before = [model.data(i) for i in view.selected_rows()]
+press(Qt.MouseButton.RightButton, row_one)
+move(Qt.MouseButton.RightButton, row_one + QPoint(60, 60))
+check("right-dragging something already selected starts the asking drag",
       started and started[0]['right'] is True, str(started))
-release(Qt.MouseButton.RightButton, row_two + QPoint(60, 60))
+check("and the whole selection comes with it",
+      [model.data(i) for i in view.selected_rows()] == before,
+      str([model.data(i) for i in view.selected_rows()]))
+release(Qt.MouseButton.RightButton, row_one + QPoint(60, 60))
 
 started.clear()
+select_rows(4)
+press(Qt.MouseButton.RightButton, row_one)
+move(Qt.MouseButton.RightButton, row_one + QPoint(60, 60))
+check("right-dragging something not selected starts no drag", started == [],
+      str(started))
+check("the view may sweep out a selection instead", view.dragEnabled() is False)
+release(Qt.MouseButton.RightButton, row_one + QPoint(60, 60))
+check("dragging is available again once the sweep ends", view.dragEnabled() is True)
+
+started.clear()
+select_rows(1)
 press(Qt.MouseButton.LeftButton, row_one)
 move(Qt.MouseButton.LeftButton, row_one + QPoint(60, 60))
-left_marked = [s for s in started if s['right']]
-check("a left-drag never asks", not left_marked, str(started))
+check("a left-drag never asks", not [s for s in started if s['right']], str(started))
 release(Qt.MouseButton.LeftButton, row_one + QPoint(60, 60))
 
 started.clear()
+select_rows(2)
 press(Qt.MouseButton.RightButton, row_two)
 release(Qt.MouseButton.RightButton, row_two)
 check("a right click that does not move starts no drag", started == [], str(started))
@@ -336,9 +352,7 @@ print("\n=== 9. only a right-drag carries the marker that asks ===")
 plain = QMimeData()
 plain.setData(ADB_MIME, b"DEVICE-A\n/sdcard/a.jpg")
 ALIVE.append(plain)
-check("a left-drag's data has no asking marker",
-      not plain.hasFormat(ADB_RIGHT_MIME))
-
+check("a left-drag's data has no asking marker", not plain.hasFormat(ADB_RIGHT_MIME))
 asking = adb_mime(MINE, ["/sdcard/a.jpg"], right=True)
 check("a right-drag's data does", asking.hasFormat(ADB_RIGHT_MIME))
 

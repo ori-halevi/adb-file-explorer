@@ -285,19 +285,22 @@ class DropMixin:
         under the cursor still becomes the selection first, otherwise the
         drag would carry whatever happened to be selected before.
         """
+        self._end_sweep()
         if event.button() == Qt.MouseButton.RightButton:
             index = self.indexAt(event.position().toPoint())
-            if index.isValid():
-                if index.row() not in {i.row() for i in self.selected_rows()}:
-                    self.selectionModel().select(
-                        index,
-                        QItemSelectionModel.SelectionFlag.ClearAndSelect
-                        | QItemSelectionModel.SelectionFlag.Rows)
-                self.selectionModel().setCurrentIndex(
-                    index, QItemSelectionModel.SelectionFlag.NoUpdate)
+            selected = {i.row() for i in self.selected_rows()}
+            if index.isValid() and index.row() in selected:
+                # Grabbing something already selected drags it, together with
+                # everything selected alongside it.
                 self._right_press = event.position().toPoint()
                 event.accept()
                 return
+            # Anywhere else the right button keeps its other use: sweeping
+            # out a selection, which is how several items get picked in the
+            # first place. The view would otherwise start a drag of its own
+            # on any button, so dragging is switched off for this gesture.
+            self._sweeping = True
+            self.setDragEnabled(False)
 
         self._right_press = None
         super().mousePressEvent(event)
@@ -317,7 +320,13 @@ class DropMixin:
 
     def mouseReleaseEvent(self, event):
         self._right_press = None
+        self._end_sweep()
         super().mouseReleaseEvent(event)
+
+    def _end_sweep(self):
+        if getattr(self, '_sweeping', False):
+            self._sweeping = False
+            self.setDragEnabled(True)
 
     def startDrag(self, supportedActions, right_button=False):
         indexes = self.selected_rows()

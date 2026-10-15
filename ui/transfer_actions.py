@@ -791,9 +791,9 @@ class TransferActionsMixin:
         limit_mb = transfer.DRAG_OUT_SIZE_LIMIT // (1024 * 1024)
         if size is None or size > transfer.DRAG_OUT_SIZE_LIMIT:
             measured = "too large" if size else "of an unknown size"
-            self._note(f"This selection is {measured} to carry in a drag "
-                       f"(over {limit_mb} MB) - let go outside the app to "
-                       f"prepare it or download it")
+            self._note(f"This selection is {measured} to carry straight away "
+                       f"(over {limit_mb} MB) - let go over the PC and it will "
+                       f"be fetched, then drag it again")
             return None
 
         folder = transfer.temp_transfer_dir(self.device_serial)
@@ -804,6 +804,7 @@ class TransferActionsMixin:
 
         ready, missing = self._prepared_paths(names)
         if ready:
+            transfer.trim_folder(folder, transfer.SCRATCH_LIMIT, keep=ready)
             self._record_handover(names)
             self._note(f"Dragging {len(ready)} item(s) - drop them in a panel, "
                        f"or anywhere on the PC")
@@ -823,18 +824,20 @@ class TransferActionsMixin:
             if os.path.isfile(local):
                 self._handed_over[self._remote_path(name)] = os.path.getsize(local)
 
-    def prepare_for_dragging(self, names=None):
+    def prepare_for_dragging(self, names=None, after_drag=False):
         """Fetch a selection into the scratch folder, with progress.
 
         Once it is there, dragging those items to the PC is instant however
-        large they are - the drag only has to hand over paths.
+        large they are - the drag only has to hand over paths. What is
+        fetched stays until the app closes, within a size cap, so this is
+        paid once per selection.
         """
         names = names or self._selected_names()
         if not names or not self._connected():
             return
 
         folder = transfer.temp_transfer_dir(self.device_serial)
-        _, missing = self._prepared_paths(names)
+        ready, missing = self._prepared_paths(names)
         if not missing:
             self._note(f"{len(names)} item(s) are ready - drag them to the PC")
             return
@@ -842,6 +845,8 @@ class TransferActionsMixin:
         ctx = TransferContext([self.adb_handler])
         handler = self.adb_handler
         remote = [self._remote_path(n) for n in missing]
+        title = ("Fetching for the drag" if after_drag
+                 else f"Preparing {len(missing)} item(s) for dragging")
 
         def run():
             outcome = TransferOutcome(len(missing))
@@ -853,50 +858,33 @@ class TransferActionsMixin:
             return outcome
 
         def on_done(outcome):
-            ready, still_missing = self._prepared_paths(names)
+            prepared, still_missing = self._prepared_paths(names)
+            # Keep the cap off what was just fetched, then say it is ready.
+            transfer.trim_folder(folder, transfer.SCRATCH_LIMIT, keep=prepared)
             if still_missing:
                 self._report_outcome(outcome, "Prepared", refresh=False)
             else:
-                self._note(f"{len(ready)} item(s) ready - drag them to the PC now")
+                self._note(f"{len(prepared)} item(s) ready - drag them to the "
+                           f"PC now, or press Ctrl+E to send them to a folder")
 
-        self._run_modal(f"Preparing {len(missing)} item(s) for dragging", run,
-                        on_done=on_done,
+        self._run_modal(title, run, on_done=on_done,
                         on_error=lambda: self._report_error("Could not prepare"),
                         ctx=ctx)
 
     def offer_download_after_drag(self, remote_paths):
         """A drag that had nothing to hand over, let go somewhere else.
 
-        Windows wants the files on disk before a drag starts, and a long
-        video or a big handful cannot be fetched inside the gesture - which
-        is why the cursor refused the drop. Offer the two ways out: fetch
-        them once, after which dragging them is instant, or download them
-        straight to a folder.
+        Windows insists on having the files before a drag begins, and a long
+        video cannot be fetched inside the gesture, so the drop was refused.
+        Rather than ask what to do about it, fetch them now - that is what
+        the gesture asked for - and say when they are ready to drag. The
+        work is visible and can be cancelled, and the same items can be sent
+        straight to a folder from the menu instead.
         """
         names = [p.rstrip('/').split('/')[-1] for p in remote_paths]
         if not names:
             return
-
-        listed = ", ".join(names[:3]) + ("..." if len(names) > 3 else "")
-        box = QMessageBox(self)
-        box.setWindowTitle("Too large to carry in a drag")
-        box.setText(f"{len(names)} item(s) could not be carried by the drag, "
-                    f"so the drop was refused.\n\n{listed}")
-        box.setInformativeText(
-            "Windows needs the files on disk before a drag begins. They can be "
-            "fetched once, after which dragging them is instant, or downloaded "
-            "straight to a folder.")
-        prepare = box.addButton("Prepare for dragging",
-                                QMessageBox.ButtonRole.AcceptRole)
-        download = box.addButton("Download to a folder...",
-                                 QMessageBox.ButtonRole.ActionRole)
-        box.addButton(QMessageBox.StandardButton.Cancel)
-        box.exec()
-
-        if box.clickedButton() is prepare:
-            self.prepare_for_dragging(names)
-        elif box.clickedButton() is download:
-            self.download_selected_items()
+        self.prepare_for_dragging(names, after_drag=True)
 
     def confirm_move_to_pc(self, remote_paths):
         """A drag out that the receiver treated as a move.

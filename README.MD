@@ -47,15 +47,18 @@ copies them there. Windows needs those files on disk before the drag begins,
 which is the one real limit here: a selection under 48 MB is fetched as the
 drag starts, and a larger one cannot be, so the cursor refuses the drop.
 
-Letting such a drag go outside the app offers the two ways round it:
+Letting such a drag go over the PC fetches the items there and then, with
+progress and a Cancel button, and says when they are ready; dragging them
+again works immediately, however large they are. The same command is in the
+right-click menu as "Prepare for dragging to the PC", for doing it in
+advance, and `Ctrl+E` sends them straight to a folder instead.
 
-- **Prepare for dragging** fetches the items once, with progress, after
-  which dragging them to the PC is instant however large they are. The same
-  command is in the right-click menu.
-- **Download to a folder** is the direct route, with no size limit.
-
-Prepared items stay ready until the app closes, and a file that has changed
-on the device since is fetched again rather than being handed over stale. If the place you drop into asks for a
+What has been fetched stays ready until the app closes, so each selection is
+paid for once. A file that has changed on the device since is fetched again
+rather than being handed over stale, and the scratch folder is kept under
+4 GB by dropping what was used least recently (`ADB_EXPLORER_SCRATCH_LIMIT_MB`
+to change that). Thumbnails are capped the same way at 512 MB
+(`ADB_EXPLORER_THUMB_CACHE_MB`), trimmed when the app starts. If the place you drop into asks for a
 move rather than a copy, the files are copied first and the panel then asks
 before deleting the originals from the phone.
 

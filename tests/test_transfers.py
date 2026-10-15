@@ -364,8 +364,8 @@ panel.selection_size = real_size
 QDrag.exec = real_exec
 check("a large selection is not fetched for the drag", not dragged.get('urls'),
       str(dragged.get('urls')))
-check("and the panel says what can be done about it",
-      "prepare" in panel.status_label.text().lower(), panel.status_label.text())
+check("and the panel says what will happen instead",
+      "fetched" in panel.status_label.text().lower(), panel.status_label.text())
 check("letting go outside the app offers a way through",
       offered and offered[0], str(offered))
 panel.offer_download_after_drag = real_offer

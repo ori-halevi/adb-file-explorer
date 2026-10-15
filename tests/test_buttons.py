@@ -558,8 +558,8 @@ select_by_name("clip.mp4")
 payload = panel.drag_out_payload()
 check("a huge item is not fetched while the drag starts", payload is None,
       str(payload))
-check("and the panel explains why", "prepare" in panel.status_label.text().lower(),
-      panel.status_label.text())
+check("and the panel explains what will happen",
+      "fetched" in panel.status_label.text().lower(), panel.status_label.text())
 
 
 def fake_pull(remote_paths, local_dir, line_callback=None):
@@ -678,6 +678,98 @@ while _time.time() < deadline and "kept" not in panel.status_label.text() \
     _time.sleep(0.02)
 check("a truncated copy leaves the original alone", deleted == [], str(deleted))
 _shutil.rmtree(scratch, ignore_errors=True)
+
+print("\n=== 18. what is kept on disk stays within bounds ===")
+import shutil as _sh
+from ui import transfer as _tr
+from ui import thumbnails as _th
+
+cap_dir = os.path.join(tempfile.gettempdir(), "adbx_cap_test")
+_sh.rmtree(cap_dir, ignore_errors=True)
+os.makedirs(cap_dir)
+for index in range(6):
+    with open(os.path.join(cap_dir, f"f{index}.bin"), 'wb') as handle:
+        handle.write(b'x' * 1024)
+    os.utime(os.path.join(cap_dir, f"f{index}.bin"), (1000 + index, 1000 + index))
+
+removed = _tr.trim_folder(cap_dir, 3 * 1024)
+left = sorted(os.listdir(cap_dir))
+check("trimming brings a folder under its cap", len(left) <= 3, str(left))
+check("and it drops the least recently used first",
+      left == ["f3.bin", "f4.bin", "f5.bin"], str(left))
+check("it reports what it freed", removed >= 3 * 1024, str(removed))
+
+for index in range(6):
+    path = os.path.join(cap_dir, f"g{index}.bin")
+    with open(path, 'wb') as handle:
+        handle.write(b'x' * 1024)
+    os.utime(path, (1000 + index, 1000 + index))
+keep = [os.path.join(cap_dir, "g0.bin")]
+_tr.trim_folder(cap_dir, 1024, keep=keep)
+check("what is about to be used is never thrown away",
+      os.path.exists(keep[0]), str(sorted(os.listdir(cap_dir))))
+_sh.rmtree(cap_dir, ignore_errors=True)
+
+check("the scratch folder has a cap", _tr.SCRATCH_LIMIT > 0, str(_tr.SCRATCH_LIMIT))
+check("the thumbnail cache has one too", _th.CACHE_LIMIT > 0, str(_th.CACHE_LIMIT))
+check("trimming the thumbnail cache is safe to call",
+      isinstance(_th.trim_cache(_th.CACHE_LIMIT), int))
+
+print("\n=== 19. a refused drag prepares by itself ===")
+scratch = _tr.temp_transfer_dir(handler.device_serial)
+_sh.rmtree(scratch, ignore_errors=True)
+scratch = _tr.temp_transfer_dir(handler.device_serial)
+
+panel.refresh_files = lambda *a, **k: None
+panel.tree_model.clear()
+panel.tree_model.setHorizontalHeaderLabels(
+    ['Name', 'Type', 'Size', 'Permissions', 'Modified'])
+panel._items_by_name = {}
+panel.current_path = "/sdcard/Pictures"
+big = 300 * 1024 * 1024
+panel.tree_model.appendRow([
+    QStandardItem("movie.mp4"), QStandardItem("File"), QStandardItem(str(big)),
+    QStandardItem("-rw-"), QStandardItem("2026-01-01 10:00")])
+panel._items_by_name["movie.mp4"] = {
+    'name': "movie.mp4", 'path': "/sdcard/Pictures/movie.mp4", 'size': big,
+    'modified': "2026-01-01 10:00", 'is_dir': False,
+    'item': panel.tree_model.item(0, 0)}
+app.processEvents()
+
+
+def fake_pull_big(remote_paths, local_dir, line_callback=None):
+    handler.calls.append(('pull_items', list(remote_paths), local_dir))
+    for remote in remote_paths:
+        name = remote.rstrip('/').split('/')[-1]
+        with open(os.path.join(local_dir, name), 'wb') as handle:
+            handle.truncate(panel._items_by_name[name]['size'])
+    return True
+
+
+handler.pull_items = fake_pull_big
+handler.calls.clear()
+select_by_name("movie.mp4")
+
+check("the drag cannot carry it", panel.drag_out_payload() is None)
+check("and the panel says it will be fetched",
+      "fetched" in panel.status_label.text().lower(), panel.status_label.text())
+
+# this is what letting go over the PC now does: no question, just the work
+panel.offer_download_after_drag(["/sdcard/Pictures/movie.mp4"])
+deadline = _time.time() + 20
+while _time.time() < deadline and "ready" not in panel.status_label.text().lower():
+    app.processEvents()
+    _time.sleep(0.02)
+check("letting go fetches it without asking", bool(handler.calls), str(handler.calls))
+check("and then says it is ready", "ready" in panel.status_label.text().lower(),
+      panel.status_label.text())
+
+handler.calls.clear()
+payload = panel.drag_out_payload()
+check("the next drag carries it", payload and payload[0].endswith("movie.mp4"),
+      str(payload))
+check("with no second fetch", handler.calls == [], str(handler.calls))
+_sh.rmtree(scratch, ignore_errors=True)
 
 print(f"\n{'=' * 60}\nPASSED {len(PASS)}  FAILED {len(FAIL)}")
 if FAIL:

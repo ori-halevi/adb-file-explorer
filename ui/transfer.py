@@ -231,6 +231,63 @@ def local_unique_path(directory, name):
     return os.path.join(directory, unique_name(name, taken))
 
 
+def _size_from_env(name, default_mb):
+    try:
+        return int(os.environ.get(name, default_mb)) * 1024 * 1024
+    except (TypeError, ValueError):
+        return default_mb * 1024 * 1024
+
+
+# Prepared copies are kept so a later drag is instant, but not without end.
+SCRATCH_LIMIT = _size_from_env('ADB_EXPLORER_SCRATCH_LIMIT_MB', 4096)
+
+
+def trim_folder(path, limit, keep=()):
+    """Delete the least recently used files until the folder fits.
+
+    Anything in `keep` is left alone, so a cap can never throw away what is
+    about to be used.
+    """
+    if not os.path.isdir(path):
+        return 0
+
+    protected = {os.path.normcase(os.path.abspath(p)) for p in keep}
+    entries = []
+    total = 0
+    for root, _, names in os.walk(path):
+        for name in names:
+            full = os.path.join(root, name)
+            try:
+                stat = os.stat(full)
+            except OSError:
+                continue
+            total += stat.st_size
+            if os.path.normcase(os.path.abspath(full)) not in protected:
+                entries.append((stat.st_atime, stat.st_size, full))
+
+    removed = 0
+    for _, size, full in sorted(entries):
+        if total <= limit:
+            break
+        try:
+            os.remove(full)
+        except OSError:
+            continue
+        total -= size
+        removed += size
+
+    # Directories left empty by that are of no use either.
+    for root, dirs, names in os.walk(path, topdown=False):
+        for name in dirs:
+            full = os.path.join(root, name)
+            try:
+                if not os.listdir(full):
+                    os.rmdir(full)
+            except OSError:
+                pass
+    return removed
+
+
 def temp_transfer_dir(serial, clear=False):
     """A per-device scratch directory for clipboard and drag payloads.
 

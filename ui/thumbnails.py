@@ -177,6 +177,44 @@ def cache_dir():
 CACHE_VERSION = 3
 
 
+# The pictures on disk are worth keeping between runs, but not for ever.
+try:
+    CACHE_LIMIT = int(os.environ.get('ADB_EXPLORER_THUMB_CACHE_MB', 512)) * 1024 * 1024
+except (TypeError, ValueError):
+    CACHE_LIMIT = 512 * 1024 * 1024
+
+
+def trim_cache(limit=None):
+    """Drop the least recently used thumbnails once the cache outgrows its cap."""
+    folder = cache_dir()
+    limit = CACHE_LIMIT if limit is None else limit
+    entries = []
+    total = 0
+    try:
+        for name in os.listdir(folder):
+            full = os.path.join(folder, name)
+            try:
+                stat = os.stat(full)
+            except OSError:
+                continue
+            total += stat.st_size
+            entries.append((stat.st_atime, stat.st_size, full))
+    except OSError:
+        return 0
+
+    removed = 0
+    for _, size, full in sorted(entries):
+        if total <= limit:
+            break
+        try:
+            os.remove(full)
+        except OSError:
+            continue
+        total -= size
+        removed += size
+    return removed
+
+
 def cache_key(serial, path, size, modified, px):
     raw = f"{CACHE_VERSION}|{serial}|{path}|{size}|{modified}|{px}".encode(
         'utf-8', errors='replace')

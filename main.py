@@ -22,6 +22,17 @@ def clear_transfer_cache():
     shutil.rmtree(os.path.join(tempfile.gettempdir(), 'adb_explorer'), ignore_errors=True)
 
 
+def trim_caches(logger):
+    """Keep what is kept between runs from growing without end."""
+    try:
+        from ui import thumbnails
+        dropped = thumbnails.trim_cache()
+        if dropped:
+            logger.info(f"Trimmed {dropped // (1024 * 1024)} MB of old thumbnails")
+    except Exception:
+        logger.exception("Could not trim the thumbnail cache")
+
+
 def install_exception_hook(logger):
     """Log unhandled exceptions instead of letting Qt abort the process.
 
@@ -65,6 +76,7 @@ def main():
 
         # Scratch copies from a previous run are not worth keeping.
         atexit.register(clear_transfer_cache)
+        trim_caches(logger)
 
         window = MultiDeviceWindow()
         window.show()

@@ -43,11 +43,19 @@ parts company with Explorer, where pressing an unselected file selects it and
 drags it in one motion; here that gesture is kept for selecting.
 
 Dragging out to Explorer, the desktop, or anything else that takes files
-copies them there. The files have to be on disk before a drag can begin, so
-a selection under 24 MB is fetched as it starts. A larger one still drags
-between panels and into folders, and if such a drag is let go outside the
-app, the panel offers to download the items instead - that route has no size
-limit, and shows progress. If the place you drop into asks for a
+copies them there. Windows needs those files on disk before the drag begins,
+which is the one real limit here: a selection under 48 MB is fetched as the
+drag starts, and a larger one cannot be, so the cursor refuses the drop.
+
+Letting such a drag go outside the app offers the two ways round it:
+
+- **Prepare for dragging** fetches the items once, with progress, after
+  which dragging them to the PC is instant however large they are. The same
+  command is in the right-click menu.
+- **Download to a folder** is the direct route, with no size limit.
+
+Prepared items stay ready until the app closes, and a file that has changed
+on the device since is fetched again rather than being handed over stale. If the place you drop into asks for a
 move rather than a copy, the files are copied first and the panel then asks
 before deleting the originals from the phone.
 
@@ -150,10 +158,9 @@ read, the transfer stops instead of assuming the folder is empty.
 - Select what you want and press **↓ To PC** in the panel's toolbar, which
   asks where to put it. This is the same as `Ctrl+E` and as right-click >
   Download to PC, and it handles folders as well as files.
-- Drag items out onto the desktop, Explorer or any app that takes files. The
-  files have to be on disk before a drag can start, so a selection under
-  24 MB is fetched as the drag begins; a larger one still drags between
-  panels, and the status bar points at "To PC" instead.
+- Drag items out onto the desktop, Explorer or any app that takes files. A
+  selection under 48 MB is fetched as the drag begins; a larger one is
+  prepared once on request and then drags instantly (see Dragging).
 - `Ctrl+Shift+C` puts the selection on the PC clipboard, then paste in Explorer
 - `Ctrl+E` or right-click > Download to PC for a chosen folder (any size)
 - Double-click a file to open it on the PC
@@ -208,8 +215,8 @@ folder's contents have changed.
 | `F2` / `Del` | Rename / Delete |
 | `F5` / `Backspace` | Refresh / Go up |
 
-Raise the 24 MB drag-out limit with `ADB_EXPLORER_DRAG_LIMIT_MB` if your
-connection is fast.
+Raise the 48 MB inline drag-out limit with `ADB_EXPLORER_DRAG_LIMIT_MB` if
+your connection is fast; it only governs what is fetched without asking.
 
 ### Tests
 Both suites run against a real connected device and clean up after

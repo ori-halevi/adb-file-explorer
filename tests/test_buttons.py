@@ -529,6 +529,79 @@ check("and matching contents are accepted", confirmed == ["/sdcard/a.txt"],
       str(confirmed))
 settings.setValue("verify_checksum", False)
 
+print("\n=== 16. a selection too large to carry can be prepared once ===")
+import shutil
+import time as _time
+from ui import transfer as transfer_module
+
+scratch = transfer_module.temp_transfer_dir(handler.device_serial)
+shutil.rmtree(scratch, ignore_errors=True)
+scratch = transfer_module.temp_transfer_dir(handler.device_serial)
+
+panel.refresh_files = lambda *a, **k: None
+panel.tree_model.clear()
+panel.tree_model.setHorizontalHeaderLabels(
+    ['Name', 'Type', 'Size', 'Permissions', 'Modified'])
+panel._items_by_name = {}
+huge = 400 * 1024 * 1024
+for index, (filename, filesize) in enumerate((("clip.mp4", huge), ("small.jpg", 1024))):
+    panel.tree_model.appendRow([
+        QStandardItem(filename), QStandardItem("File"), QStandardItem(str(filesize)),
+        QStandardItem("-rw-"), QStandardItem("2026-01-01 10:00")])
+    panel._items_by_name[filename] = {
+        'name': filename, 'path': f"/sdcard/Pictures/{filename}", 'size': filesize,
+        'modified': "2026-01-01 10:00", 'is_dir': False,
+        'item': panel.tree_model.item(index, 0)}
+app.processEvents()
+
+select_by_name("clip.mp4")
+payload = panel.drag_out_payload()
+check("a huge item is not fetched while the drag starts", payload is None,
+      str(payload))
+check("and the panel explains why", "prepare" in panel.status_label.text().lower(),
+      panel.status_label.text())
+
+
+def fake_pull(remote_paths, local_dir, line_callback=None):
+    handler.calls.append(('pull_items', list(remote_paths), local_dir))
+    for remote in remote_paths:
+        name = remote.rstrip('/').split('/')[-1]
+        # a sparse file of the right length, rather than writing 400 MB
+        with open(os.path.join(local_dir, name), 'wb') as handle:
+            handle.truncate(panel._items_by_name[name]['size'])
+    return True
+
+
+handler.pull_items = fake_pull
+handler.calls.clear()
+panel.prepare_for_dragging(["clip.mp4"])
+deadline = _time.time() + 20
+while _time.time() < deadline and "ready" not in panel.status_label.text().lower():
+    app.processEvents()
+    _time.sleep(0.02)
+
+check("preparing fetches it once", bool(handler.calls), str(handler.calls))
+check("the panel says it is ready", "ready" in panel.status_label.text().lower(),
+      panel.status_label.text())
+
+handler.calls.clear()
+payload = panel.drag_out_payload()
+check("the prepared item now drags whatever its size",
+      payload and payload[0].endswith("clip.mp4"), str(payload))
+check("and no second fetch was needed", handler.calls == [], str(handler.calls))
+
+# a file that changed on the device must not be served from the old copy
+panel._items_by_name["clip.mp4"]['size'] = huge + 17
+payload = panel.drag_out_payload()
+check("a stale copy is not reused", payload is None, str(payload))
+
+select_by_name("small.jpg")
+handler.calls.clear()
+payload = panel.drag_out_payload()
+check("a small item is still fetched on the spot",
+      payload and payload[0].endswith("small.jpg"), str(payload))
+shutil.rmtree(scratch, ignore_errors=True)
+
 print(f"\n{'=' * 60}\nPASSED {len(PASS)}  FAILED {len(FAIL)}")
 if FAIL:
     print("FAILURES:")

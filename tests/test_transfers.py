@@ -349,7 +349,10 @@ check("and still carries the internal format for panel-to-panel drops",
 
 # A selection past the limit must not stall the drag while it is fetched,
 # and the gesture must not simply die either: letting go of it outside the
-# app offers the download, which has no size limit.
+# app offers to prepare or download it.
+import shutil
+
+shutil.rmtree(transfer.temp_transfer_dir(panel.device_serial), ignore_errors=True)
 dragged.clear()
 offered = []
 real_size = panel.selection_size
@@ -361,11 +364,25 @@ panel.selection_size = real_size
 QDrag.exec = real_exec
 check("a large selection is not fetched for the drag", not dragged.get('urls'),
       str(dragged.get('urls')))
-check("and the panel says what to use instead",
-      "To PC" in panel.status_label.text(), panel.status_label.text())
-check("letting go outside the app offers the download instead",
+check("and the panel says what can be done about it",
+      "prepare" in panel.status_label.text().lower(), panel.status_label.text())
+check("letting go outside the app offers a way through",
       offered and offered[0], str(offered))
 panel.offer_download_after_drag = real_offer
+
+# once prepared, the same selection drags however large it is
+prepared = transfer.temp_transfer_dir(panel.device_serial)
+with open(os.path.join(prepared, "into"), "wb") as handle:
+    handle.write(b"")
+dragged.clear()
+QDrag.exec = capture_drag
+panel.selection_size = lambda timeout=20: transfer.DRAG_OUT_SIZE_LIMIT + 1
+panel.tree_view.startDrag(Qt.DropAction.CopyAction)
+panel.selection_size = real_size
+QDrag.exec = real_exec
+check("a prepared item is carried whatever the limit says",
+      bool(dragged.get('urls')), str(dragged.get('urls')))
+shutil.rmtree(prepared, ignore_errors=True)
 
 print("\n=== 14. '..' is never treated as a selectable item ===")
 goto(f"{BASE}/into")

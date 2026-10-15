@@ -748,52 +748,138 @@ class TransferActionsMixin:
             total += measured
         return total
 
-    def drag_out_payload(self):
-        """Fetch the selection so the drag can also be dropped on the PC.
+    def _prepared_paths(self, names):
+        """Items already fetched for dragging, still matching the device.
 
-        This runs as a drag begins, so it must be quick and silent: the files
-        have to be on disk before the drag starts. A selection small enough is
-        fetched, and anything larger simply drags within the app while the
-        status bar says which command to use instead.
+        Preparing a selection once makes every later drag of it instant, so
+        a large selection can be dragged out on the second attempt.
+        """
+        folder = transfer.temp_transfer_dir(self.device_serial)
+        ready, missing = [], []
+        for name in names:
+            local = os.path.join(folder, name)
+            item = self._items_by_name.get(name) or {}
+            if not os.path.exists(local):
+                missing.append(name)
+                continue
+            if not item.get('is_dir') and os.path.getsize(local) != item.get('size'):
+                missing.append(name)
+                continue
+            ready.append(local)
+        return ready, missing
+
+    def drag_out_payload(self):
+        """Put the selection on disk so the drag can also be dropped on the PC.
+
+        This runs as the drag begins and the files have to exist before it
+        starts, so only a small selection is fetched on the spot. Anything
+        already prepared is used whatever its size, which is what makes a
+        second drag of a large selection work.
         """
         names = self._selected_names()
         if not names or not self.adb_handler.device_connected:
             return None
 
+        ready, missing = self._prepared_paths(names)
+        if not missing:
+            self._note(f"Dragging {len(ready)} item(s) - drop them in a panel, "
+                       f"or anywhere on the PC")
+            return ready
+
         size = self.selection_size(timeout=5)
         limit_mb = transfer.DRAG_OUT_SIZE_LIMIT // (1024 * 1024)
         if size is None or size > transfer.DRAG_OUT_SIZE_LIMIT:
-            measured = "too large" if size else "an unknown size"
-            self._note(f"Dragging to the PC is limited to {limit_mb} MB and this "
-                       f"selection is {measured} - use \u2193 To PC (Ctrl+E)")
+            measured = "too large" if size else "of an unknown size"
+            self._note(f"This selection is {measured} to carry in a drag "
+                       f"(over {limit_mb} MB) - let go outside the app to "
+                       f"prepare it or download it")
             return None
 
-        target = transfer.temp_transfer_dir(self.device_serial, clear=True)
-        if not self.adb_handler.pull_items([self._remote_path(n) for n in names], target):
+        folder = transfer.temp_transfer_dir(self.device_serial)
+        if not self.adb_handler.pull_items(
+                [self._remote_path(n) for n in missing], folder):
             self._report_error("Could not prepare the drag")
             return None
 
-        local = [p for p in (os.path.join(target, n) for n in names) if os.path.exists(p)]
-        if local:
-            self._note(f"Dragging {len(local)} item(s) - drop them in a panel, "
+        ready, missing = self._prepared_paths(names)
+        if ready:
+            self._note(f"Dragging {len(ready)} item(s) - drop them in a panel, "
                        f"or anywhere on the PC")
-        return local
+        return ready
+
+    def prepare_for_dragging(self, names=None):
+        """Fetch a selection into the scratch folder, with progress.
+
+        Once it is there, dragging those items to the PC is instant however
+        large they are - the drag only has to hand over paths.
+        """
+        names = names or self._selected_names()
+        if not names or not self._connected():
+            return
+
+        folder = transfer.temp_transfer_dir(self.device_serial)
+        _, missing = self._prepared_paths(names)
+        if not missing:
+            self._note(f"{len(names)} item(s) are ready - drag them to the PC")
+            return
+
+        ctx = TransferContext([self.adb_handler])
+        handler = self.adb_handler
+        remote = [self._remote_path(n) for n in missing]
+
+        def run():
+            outcome = TransferOutcome(len(missing))
+            ok = handler.pull_items(remote, folder, line_callback=ctx.say)
+            error = None if ok else handler.last_error
+            for name in missing:
+                outcome.record(name, ok, error)
+            outcome.cancelled = ctx.cancelled
+            return outcome
+
+        def on_done(outcome):
+            ready, still_missing = self._prepared_paths(names)
+            if still_missing:
+                self._report_outcome(outcome, "Prepared", refresh=False)
+            else:
+                self._note(f"{len(ready)} item(s) ready - drag them to the PC now")
+
+        self._run_modal(f"Preparing {len(missing)} item(s) for dragging", run,
+                        on_done=on_done,
+                        on_error=lambda: self._report_error("Could not prepare"),
+                        ctx=ctx)
 
     def offer_download_after_drag(self, remote_paths):
-        """A drag that had nothing to hand over, ending somewhere else.
+        """A drag that had nothing to hand over, let go somewhere else.
 
-        The files were too large to fetch while the drag started, so rather
-        than leaving the gesture dead, offer the transfer that has no limit.
+        Windows wants the files on disk before a drag starts, and a long
+        video or a big handful cannot be fetched inside the gesture - which
+        is why the cursor refused the drop. Offer the two ways out: fetch
+        them once, after which dragging them is instant, or download them
+        straight to a folder.
         """
         names = [p.rstrip('/').split('/')[-1] for p in remote_paths]
         if not names:
             return
+
         listed = ", ".join(names[:3]) + ("..." if len(names) > 3 else "")
-        limit_mb = transfer.DRAG_OUT_SIZE_LIMIT // (1024 * 1024)
-        if self._confirm(
-                "Too large to drag",
-                f"{len(names)} item(s) are larger than the {limit_mb} MB a drag "
-                f"can carry.\n\n{listed}\n\nDownload them to the PC instead?"):
+        box = QMessageBox(self)
+        box.setWindowTitle("Too large to carry in a drag")
+        box.setText(f"{len(names)} item(s) could not be carried by the drag, "
+                    f"so the drop was refused.\n\n{listed}")
+        box.setInformativeText(
+            "Windows needs the files on disk before a drag begins. They can be "
+            "fetched once, after which dragging them is instant, or downloaded "
+            "straight to a folder.")
+        prepare = box.addButton("Prepare for dragging",
+                                QMessageBox.ButtonRole.AcceptRole)
+        download = box.addButton("Download to a folder...",
+                                 QMessageBox.ButtonRole.ActionRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+
+        if box.clickedButton() is prepare:
+            self.prepare_for_dragging(names)
+        elif box.clickedButton() is download:
             self.download_selected_items()
 
     def confirm_move_to_pc(self, remote_paths):

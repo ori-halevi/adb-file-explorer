@@ -30,12 +30,13 @@ REPLACE = 'replace'
 SKIP = 'skip'
 CANCEL = 'cancel'
 
-# A drag has to finish fetching before it can start, so only a selection this
-# small is prepared inline. Larger ones go through Download to PC.
+# A drag cannot begin until the files are on disk, so only a selection this
+# small is fetched on the spot - about two seconds over USB. Larger ones are
+# prepared once on request, after which dragging them costs nothing.
 try:
-    DRAG_OUT_SIZE_LIMIT = int(os.environ.get('ADB_EXPLORER_DRAG_LIMIT_MB', 24)) * 1024 * 1024
+    DRAG_OUT_SIZE_LIMIT = int(os.environ.get('ADB_EXPLORER_DRAG_LIMIT_MB', 48)) * 1024 * 1024
 except (TypeError, ValueError):
-    DRAG_OUT_SIZE_LIMIT = 24 * 1024 * 1024
+    DRAG_OUT_SIZE_LIMIT = 48 * 1024 * 1024
 
 
 class ConflictDialog(QDialog):
@@ -231,7 +232,11 @@ def local_unique_path(directory, name):
 
 
 def temp_transfer_dir(serial, clear=False):
-    """A per-device scratch directory for clipboard and drag payloads."""
+    """A per-device scratch directory for clipboard and drag payloads.
+
+    What lands here is kept between drags on purpose: fetching a selection
+    once is what lets a later drag of the same items start instantly.
+    """
     safe = re.sub(r'[^A-Za-z0-9_.-]', '_', serial or 'device')
     path = os.path.join(tempfile.gettempdir(), 'adb_explorer', safe)
     if clear:

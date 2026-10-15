@@ -1075,6 +1075,7 @@ class DevicePanel(TransferActionsMixin, QWidget):
 
         menu.addAction(f"Download to PC...	Ctrl+E", self.download_selected_items)
         menu.addAction(f"Copy to PC clipboard	Ctrl+Shift+C", self.copy_to_pc_clipboard)
+        menu.addAction("Prepare for dragging to the PC", self.prepare_for_dragging)
         send_menu = menu.addMenu("Send to device")
         self._populate_send_to_menu(send_menu, self.selected_rows(), None)
         menu.addSeparator()

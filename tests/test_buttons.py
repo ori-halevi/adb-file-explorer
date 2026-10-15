@@ -352,6 +352,39 @@ order = [panel.tree_model.data(panel.tree_model.index(r, 0))
 check("sorting by size, smallest first",
       order == ["..", "zz", "b.txt", "a.txt"], str(order))
 
+print("\n=== 11. a thumbnail says what kind of file it is ===")
+from PyQt6.QtGui import QColor, QPixmap
+from ui import thumbnails
+
+plain = QPixmap(96, 96)
+plain.fill(QColor("#808080"))
+
+
+def pixels(pixmap):
+    image = pixmap.toImage()
+    return bytes(image.constBits().asarray(image.sizeInBytes()))
+
+
+untouched = thumbnails.decorate(QPixmap(plain), badge=None, video=False)
+check("a photo with no known program is left alone",
+      pixels(untouched) == pixels(plain))
+
+as_video = thumbnails.decorate(QPixmap(plain), badge=None, video=True)
+check("a video gets a play symbol", pixels(as_video) != pixels(plain))
+
+badge_icon = panel._icon_for("something.jpg")
+badged = thumbnails.decorate(QPixmap(plain), badge=badge_icon, video=False)
+check("the program's icon is stamped on the thumbnail",
+      pixels(badged) != pixels(plain))
+
+tiny = QPixmap(16, 16)
+tiny.fill(QColor("#808080"))
+small = thumbnails.decorate(QPixmap(tiny), badge=badge_icon, video=True)
+check("a tiny icon is not cluttered with marks", pixels(small) == pixels(tiny))
+
+check("videos are recognised by name", thumbnails.is_video("clip.MP4") is True)
+check("photos are not", thumbnails.is_video("photo.jpg") is False)
+
 print(f"\n{'=' * 60}\nPASSED {len(PASS)}  FAILED {len(FAIL)}")
 if FAIL:
     print("FAILURES:")

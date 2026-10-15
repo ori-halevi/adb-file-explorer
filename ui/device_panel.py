@@ -103,6 +103,7 @@ class DevicePanel(TransferActionsMixin, QWidget):
         self._folder_icon = self._icon_provider.icon(QFileIconProvider.IconType.Folder)
         self._file_icon = self._icon_provider.icon(QFileIconProvider.IconType.File)
         self._icon_cache = {}
+        self._generic_icon_key = None
 
         
         self.root_path = "/"
@@ -426,7 +427,9 @@ class DevicePanel(TransferActionsMixin, QWidget):
         if standard_item is None:
             return
         try:
-            standard_item.setIcon(QIcon(pixmap))
+            marked = thumbnails.decorate(pixmap, badge=self._badge_for(name),
+                                         video=thumbnails.is_video(name))
+            standard_item.setIcon(QIcon(marked))
         except RuntimeError:
             pass
 
@@ -668,11 +671,7 @@ class DevicePanel(TransferActionsMixin, QWidget):
             if file_item.is_dir:
                 name_item.setIcon(self._folder_icon)
             else:
-                ext = os.path.splitext(file_item.name)[1].lower()
-                if ext not in self._icon_cache:
-                    icon = self._icon_provider.icon(QFileInfo(f"x{ext}"))
-                    self._icon_cache[ext] = icon if not icon.isNull() else self._file_icon
-                name_item.setIcon(self._icon_cache[ext])
+                name_item.setIcon(self._icon_for(file_item.name))
             self._items_by_name[file_item.name] = {
                 'name': file_item.name,
                 'path': file_item.path,
@@ -766,6 +765,35 @@ class DevicePanel(TransferActionsMixin, QWidget):
                 model.select(index,
                              QItemSelectionModel.SelectionFlag.Deselect
                              | QItemSelectionModel.SelectionFlag.Rows)
+
+    def _icon_for(self, name):
+        """The icon the system gives this kind of file, cached per extension."""
+        ext = os.path.splitext(name)[1].lower()
+        if ext not in self._icon_cache:
+            icon = self._icon_provider.icon(QFileInfo(f"x{ext}"))
+            self._icon_cache[ext] = icon if not icon.isNull() else self._file_icon
+        return self._icon_cache[ext]
+
+    def _badge_for(self, name):
+        """The program icon to stamp on a thumbnail, if it says anything.
+
+        An unregistered extension comes back as the plain page icon, which
+        would only clutter a picture, so that one is left off.
+        """
+        icon = self._icon_for(name)
+        if icon is self._file_icon:
+            return None
+        if self._generic_icon_key is None:
+            self._generic_icon_key = self._icon_key(self._file_icon)
+        return None if self._icon_key(icon) == self._generic_icon_key else icon
+
+    @staticmethod
+    def _icon_key(icon):
+        pixmap = icon.pixmap(32, 32)
+        if pixmap.isNull():
+            return None
+        image = pixmap.toImage()
+        return bytes(image.constBits().asarray(image.sizeInBytes()))
 
     def handle_double_click(self, index):
         name_index = self.tree_model.index(index.row(), 0)

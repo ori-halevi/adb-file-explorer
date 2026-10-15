@@ -67,6 +67,10 @@ and only for the rows actually on screen:
   `ffmpeg` happens to be on `PATH` (or in `FFMPEG_PATH`) it is used instead,
   purely because it can run on a worker thread, but it is never required.
 
+Every thumbnail is stamped with the icon of the program that opens that kind
+of file, the way a desktop file manager does, and videos also carry a play
+symbol - so a video frame is never mistaken for a photo.
+
 Thumbnails are cached on disk under `%LOCALAPPDATA%\adb_explorer\thumbnails`
 (`~/.cache/adb_explorer` elsewhere), keyed by path, size and timestamp, so a
 folder costs nothing to revisit. The view menu can also turn video thumbnails

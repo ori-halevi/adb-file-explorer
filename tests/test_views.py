@@ -70,6 +70,55 @@ panel = window.device_panels[0]
 h = panel.adb_handler
 
 BASE = "/sdcard/adbx_view_tests"
+print("\n=== 8. queued videos keep their own frames ===")
+# A shared player handed the next clip the previous clip's frame, so videos
+# showed each other's thumbnails.
+import hashlib
+
+clips = [f for f in (h.list_directory("/sdcard/DCIM/Camera") or [])
+         if f.name.lower().endswith('.mp4') and f.size > 1_000_000][:3]
+if len(clips) >= 2 and thumbnails.QT_VIDEO:
+    def fingerprint(image):
+        if image is None:
+            return None
+        small = image.scaled(8, 8)
+        return hashlib.md5(bytes(small.constBits().asarray(
+            small.sizeInBytes()))).hexdigest()[:10]
+
+    local = []
+    for clip in clips:
+        folder = tempfile.mkdtemp(prefix='adbx_clip_test_')
+        local.append((clip.name,
+                      thumbnails.fetch_video_locally(h.device_serial, clip.path,
+                                                     clip.size, folder)))
+
+    alone = {}
+    for name, path in local:
+        grabber = thumbnails.VideoFrameGrabber()
+        result = {}
+        grabber.finished.connect(lambda key, image: result.update({'image': image}))
+        grabber.grab(name, path, 96)
+        pump(20, until=lambda: 'image' in result)
+        alone[name] = fingerprint(result.get('image'))
+
+    queued = {}
+    grabber = thumbnails.VideoFrameGrabber()
+    grabber.finished.connect(
+        lambda key, image: queued.update({key: fingerprint(image)}))
+    for name, path in local:
+        grabber.grab(name, path, 96)
+    pump(60, until=lambda: len(queued) == len(local))
+
+    check("every queued clip was decoded", len(queued) == len(local),
+          f"{len(queued)} of {len(local)}")
+    mismatched = [n for n, _ in local if queued.get(n) != alone.get(n)]
+    check("each clip kept its own frame", not mismatched, str(mismatched))
+    check("different clips gave different frames",
+          len({v for v in alone.values() if v}) == len([v for v in alone.values() if v]),
+          str(list(alone.values())))
+else:
+    print("  (not enough video on the device to check)")
+
 h.delete_item(BASE, is_dir=True, missing_ok=True)
 h.create_folder(BASE)
 

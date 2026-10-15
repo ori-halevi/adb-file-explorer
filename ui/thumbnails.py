@@ -25,8 +25,10 @@ import struct
 import subprocess
 import tempfile
 
-from PyQt6.QtCore import Qt, QObject, QRunnable, QThreadPool, QTimer, QUrl, pyqtSignal
-from PyQt6.QtGui import QImage, QPixmap, QTransform
+from PyQt6.QtCore import (Qt, QObject, QPoint, QRunnable, QThreadPool, QTimer,
+                          QUrl, pyqtSignal)
+from PyQt6.QtGui import (QColor, QImage, QPainter, QPixmap, QPolygon,
+                         QTransform)
 
 try:
     from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
@@ -101,6 +103,55 @@ def video_backend():
     return None
 
 
+def is_video(name):
+    return os.path.splitext(name)[1].lower() in VIDEO_EXTS
+
+
+def decorate(pixmap, badge=None, video=False):
+    """Mark a thumbnail so its kind is obvious at a glance.
+
+    A picture of a frame looks exactly like a photo, so videos get a play
+    symbol, and every thumbnail carries the small icon of whichever program
+    opens that kind of file - the same cue a desktop file manager gives.
+    """
+    if pixmap is None or pixmap.isNull():
+        return pixmap
+
+    width, height = pixmap.width(), pixmap.height()
+    if min(width, height) < 32:
+        return pixmap
+
+    canvas = QPixmap(pixmap)
+    painter = QPainter(canvas)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+    if video:
+        side = max(16, int(min(width, height) * 0.34))
+        centre_x, centre_y = width // 2, height // 2
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 120))
+        painter.drawEllipse(centre_x - side // 2, centre_y - side // 2, side, side)
+        tip = side // 3
+        triangle = QPolygon([
+            QPoint(centre_x - tip // 2, centre_y - tip),
+            QPoint(centre_x - tip // 2, centre_y + tip),
+            QPoint(centre_x + tip, centre_y),
+        ])
+        painter.setBrush(QColor(255, 255, 255, 220))
+        painter.drawPolygon(triangle)
+
+    if badge is not None and not badge.isNull():
+        box = max(16, min(int(min(width, height) * 0.38), 32))
+        x, y = width - box - 2, height - box - 2
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 110))
+        painter.drawRoundedRect(x - 2, y - 2, box + 4, box + 4, 4, 4)
+        painter.drawPixmap(x, y, badge.pixmap(box, box))
+
+    painter.end()
+    return canvas
+
+
 def can_thumbnail(name, is_dir, videos_enabled=True):
     if is_dir:
         return False
@@ -123,7 +174,7 @@ def cache_dir():
 
 # Bumped when the pictures themselves change meaning, so stale entries from
 # an older build are simply never found.
-CACHE_VERSION = 2
+CACHE_VERSION = 3
 
 
 def cache_key(serial, path, size, modified, px):
@@ -395,6 +446,11 @@ class VideoFrameGrabber(QObject):
     QMediaPlayer has to live on a thread with an event loop, so requests are
     queued here and answered asynchronously; a watchdog moves on if a file
     turns out to be undecodable.
+
+    Each clip gets its own player. Reusing one player handed a clip the
+    previous clip's frame: a frame already in flight arrived after the source
+    had been swapped, and was credited to the wrong video. A frame is also
+    only accepted once the player reports the new file as loaded.
     """
 
     finished = pyqtSignal(str, object)      # key, QImage or None
@@ -408,6 +464,7 @@ class VideoFrameGrabber(QObject):
         self._player = None
         self._sink = None
         self._audio = None
+        self._accepting = False
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(self._give_up)
@@ -417,9 +474,10 @@ class VideoFrameGrabber(QObject):
         if self._current is None:
             self._start_next()
 
-    def _ensure_player(self):
-        if self._player is not None:
-            return
+    # ------------------------------------------------------------ player --
+
+    def _new_player(self):
+        self._teardown()
         self._sink = QVideoSink(self)
         self._audio = QAudioOutput(self)
         self._audio.setMuted(True)
@@ -428,7 +486,33 @@ class VideoFrameGrabber(QObject):
         self._player.setVideoSink(self._sink)
         self._sink.videoFrameChanged.connect(self._on_frame)
         self._player.mediaStatusChanged.connect(self._on_status)
-        self._player.errorOccurred.connect(lambda *_: self._give_up())
+        self._player.errorOccurred.connect(self._on_error)
+
+    def _teardown(self):
+        """Drop the player, which also releases the clip file."""
+        self._accepting = False
+        player, sink, audio = self._player, self._sink, self._audio
+        self._player = self._sink = self._audio = None
+
+        if player is not None:
+            try:
+                player.mediaStatusChanged.disconnect()
+                player.errorOccurred.disconnect()
+                player.stop()
+                player.setSource(QUrl())
+            except (RuntimeError, TypeError):
+                pass
+            player.deleteLater()
+        if sink is not None:
+            try:
+                sink.videoFrameChanged.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+            sink.deleteLater()
+        if audio is not None:
+            audio.deleteLater()
+
+    # ------------------------------------------------------------- queue --
 
     def _start_next(self):
         self._current = None
@@ -439,21 +523,33 @@ class VideoFrameGrabber(QObject):
                 continue
             self._current = (key, local_path, px)
             break
+
         if self._current is None:
+            self._teardown()
             return
 
-        self._ensure_player()
+        self._new_player()
         self._timer.start(self.TIMEOUT_MS)
         self._player.setSource(QUrl.fromLocalFile(self._current[1]))
 
     def _on_status(self, status):
-        if self._current and status == QMediaPlayer.MediaStatus.LoadedMedia:
+        if not self._current:
+            return
+        if status == QMediaPlayer.MediaStatus.LoadedMedia:
+            # Frames before this point cannot belong to the current file.
+            self._accepting = True
             # A second in avoids the black frame many clips open with.
             self._player.setPosition(1000)
             self._player.play()
+        elif status in (QMediaPlayer.MediaStatus.InvalidMedia,
+                        QMediaPlayer.MediaStatus.NoMedia):
+            self._give_up()
+
+    def _on_error(self, *args):
+        self._give_up()
 
     def _on_frame(self, frame):
-        if not self._current or not frame.isValid():
+        if not self._accepting or not self._current or not frame.isValid():
             return
         image = frame.toImage()
         if image.isNull() or image.width() <= 1:
@@ -461,16 +557,30 @@ class VideoFrameGrabber(QObject):
         self._deliver(image.copy())
 
     def _give_up(self):
-        self._deliver(None)
+        if self._current:
+            self._deliver(None)
 
     def _deliver(self, image):
         if not self._current:
             return
-        key = self._current[0]
+        self._accepting = False
         self._timer.stop()
-        self._player.stop()
-        self._player.setSource(QUrl())
+        key = self._current[0]
+        self._current = (key, self._current[1], self._current[2])
+        self._pending_result = (key, image)
+        # Finish outside the signal that produced the frame, so the player can
+        # be destroyed safely and its file handle released before the caller
+        # deletes the clip.
+        QTimer.singleShot(0, self._finish_current)
+
+    def _finish_current(self):
+        result = getattr(self, '_pending_result', None)
+        if result is None:
+            return
+        self._pending_result = None
         self._current = None
+        self._teardown()
+        key, image = result
         self.finished.emit(key, image)
         self._start_next()
 

@@ -131,7 +131,8 @@ themselves:
 ```bash
 python tests/test_transfers.py   # copy, move, conflicts, cancel, failures
 python tests/test_views.py       # view modes, thumbnails, cache, rotation
-python tests/test_theme.py       # readable text in both themes (no device needed)
+python tests/test_theme.py       # readable text in both themes (no device)
+python tests/test_buttons.py     # the toolbar buttons do what they say (no device)
 ```
 
 `test_transfers.py` covers the destructive paths deliberately - replace,
@@ -140,7 +141,14 @@ rollback, cancellation and partial failure - inside `/sdcard/adbx_cr_tests`.
 ## Installation
 ### Option 1: Download Executable (Windows)
 Download the latest release from the [Releases](../../releases) page and run the `.exe` file.
-### Option 2: Run from Source
+### Option 2: Just run it (no build)
+Double-click **`run.bat`**. It starts the app straight from the source: it
+uses the local `venv` if there is one, falls back to a system Python that
+already has PyQt6, and only if neither exists does it create an environment
+and install PyQt6 once. Nothing is compiled or packaged, and later runs start
+immediately.
+
+### Option 3: Run from Source
 **Requirements:**
 - Python 3.10+
 - PyQt6

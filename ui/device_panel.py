@@ -186,13 +186,15 @@ class DevicePanel(TransferActionsMixin, QWidget):
         self.to_pc_btn = QPushButton("\u2193 To PC")
         self.to_pc_btn.setObjectName("to_pc_btn")
         self.to_pc_btn.setToolTip("Download the selected files and folders to this PC (Ctrl+E)")
-        self.to_pc_btn.clicked.connect(self.download_selected_items)
+        # clicked() hands a "checked" bool to any slot that can take an
+        # argument, which would land in dest_dir, so swallow it here.
+        self.to_pc_btn.clicked.connect(lambda: self.download_selected_items())
         nav_layout.addWidget(self.to_pc_btn)
 
         self.from_pc_btn = QPushButton("\u2191 From PC")
         self.from_pc_btn.setObjectName("from_pc_btn")
         self.from_pc_btn.setToolTip("Upload files from this PC to the current folder (Ctrl+U)")
-        self.from_pc_btn.clicked.connect(self.upload_file_to_device)
+        self.from_pc_btn.clicked.connect(lambda: self.upload_file_to_device())
         nav_layout.addWidget(self.from_pc_btn)
 
         self.view_btn = QToolButton()

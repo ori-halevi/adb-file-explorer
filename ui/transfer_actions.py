@@ -609,7 +609,9 @@ class TransferActionsMixin:
         if not names or not self._connected():
             return
 
-        if dest_dir is None:
+        # Anything that is not a real path means "ask", including the bool a
+        # button's clicked() signal would otherwise pass in here.
+        if not isinstance(dest_dir, str) or not dest_dir:
             dest_dir = QFileDialog.getExistingDirectory(
                 self, "Download Location", self._last_download_dir or "")
             if not dest_dir:

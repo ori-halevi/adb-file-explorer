@@ -52,13 +52,6 @@ THUMBNAIL_PX = {
 }
 
 
-def mode_label(mode):
-    for key, label, _ in VIEW_MODES:
-        if key == mode:
-            return label
-    return mode
-
-
 def icon_px(mode):
     for key, _, px in VIEW_MODES:
         if key == mode:

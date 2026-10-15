@@ -73,12 +73,6 @@ class FakePanel:
     def is_dir_for_path(self, path):
         return False
 
-    def drag_out_payload(self):
-        return None
-
-    def hint_drag_to_pc(self):
-        pass
-
     def confirm_move_to_pc(self, paths):
         self.calls.append(('confirm-move-out', list(paths)))
 

@@ -729,25 +729,6 @@ class TransferActionsMixin:
     def is_dir_for_path(self, path):
         return self._is_dir_of_name(path.rstrip('/').split('/')[-1])
 
-    def selection_size(self, timeout=20):
-        """Bytes in the current selection, or None if a folder cannot be measured."""
-        total = 0
-        folders = []
-        for index in self.selected_rows():
-            name = self.tree_model.data(index.siblingAtColumn(0))
-            if not name or name == "..":
-                continue
-            if self.is_dir_from_row(index.row()):
-                folders.append(self._remote_path(name))
-            else:
-                total += self.get_file_size_from_row(index.row())
-        if folders:
-            measured = self.adb_handler.disk_usage_many(folders, timeout=timeout)
-            if measured is None:
-                return None
-            total += measured
-        return total
-
     def _prepared_paths(self, names):
         """Items already fetched for dragging, still matching the device.
 
@@ -831,48 +812,6 @@ class TransferActionsMixin:
             None if getattr(self, '_closing', False)
             else self.prepare_for_dragging(names, after_drag=True)))
         return True
-
-    def drag_out_payload(self):
-        """Put the selection on disk so the drag can also be dropped on the PC.
-
-        This runs as the drag begins and the files have to exist before it
-        starts, so only a small selection is fetched on the spot. Anything
-        already prepared is used whatever its size, which is what makes a
-        second drag of a large selection work.
-        """
-        names = self._selected_names()
-        if not names or not self.adb_handler.device_connected:
-            return None
-
-        ready, missing = self._prepared_paths(names)
-        if not missing:
-            self._record_handover(names)
-            self._note(f"Dragging {len(ready)} item(s) - drop them in a panel, "
-                       f"or anywhere on the PC")
-            return ready
-
-        size = self.selection_size(timeout=5)
-        limit_mb = transfer.DRAG_OUT_SIZE_LIMIT // (1024 * 1024)
-        if size is None or size > transfer.DRAG_OUT_SIZE_LIMIT:
-            measured = "too large" if size else "of an unknown size"
-            self._note(f"This selection is {measured} to carry straight away "
-                       f"(over {limit_mb} MB) - let go over the PC and it will "
-                       f"be fetched, then drag it again")
-            return None
-
-        folder = transfer.temp_transfer_dir(self.device_serial)
-        if not self.adb_handler.pull_items(
-                [self._remote_path(n) for n in missing], folder):
-            self._report_error("Could not prepare the drag")
-            return None
-
-        ready, missing = self._prepared_paths(names)
-        if ready:
-            transfer.trim_folder(folder, transfer.SCRATCH_LIMIT, keep=ready)
-            self._record_handover(names)
-            self._note(f"Dragging {len(ready)} item(s) - drop them in a panel, "
-                       f"or anywhere on the PC")
-        return ready
 
     def _record_handover(self, names):
         """Note the size of each copy as it is handed to the drag.
@@ -1005,15 +944,6 @@ class TransferActionsMixin:
                         on_done=lambda o: self._report_outcome(o, "Moved to the PC -"),
                         on_error=lambda: self._report_error("Could not remove the originals"),
                         ctx=ctx)
-
-    def hint_drag_to_pc(self):
-        """Kept for callers that only want the tip, without fetching anything."""
-        if getattr(self, '_drag_hint_shown', False):
-            return
-        self._drag_hint_shown = True
-        limit_mb = transfer.DRAG_OUT_SIZE_LIMIT // (1024 * 1024)
-        self._note(f"Drag items anywhere on the PC (up to {limit_mb} MB), or use "
-                   f"\u2193 To PC for more")
 
     # -------------------------------------------------------- device to device
 

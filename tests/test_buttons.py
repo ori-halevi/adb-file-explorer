@@ -554,12 +554,17 @@ for index, (filename, filesize) in enumerate((("clip.mp4", huge), ("small.jpg", 
         'item': panel.tree_model.item(index, 0)}
 app.processEvents()
 
+def drag_payload():
+    """What a receiver gets when it reads the drag's files."""
+    return panel.fetch_for_drag(panel._selected_names())
+
+
 select_by_name("clip.mp4")
-payload = panel.drag_out_payload()
-check("a huge item is not fetched while the drag starts", payload is None,
+payload = drag_payload()
+check("a huge item is not fetched while the drag is in hand", payload == [],
       str(payload))
 check("and the panel explains what will happen",
-      "fetched" in panel.status_label.text().lower(), panel.status_label.text())
+      "drag again" in panel.status_label.text().lower(), panel.status_label.text())
 
 
 def fake_pull(remote_paths, local_dir, line_callback=None):
@@ -585,19 +590,19 @@ check("the panel says it is ready", "ready" in panel.status_label.text().lower()
       panel.status_label.text())
 
 handler.calls.clear()
-payload = panel.drag_out_payload()
+payload = drag_payload()
 check("the prepared item now drags whatever its size",
       payload and payload[0].endswith("clip.mp4"), str(payload))
 check("and no second fetch was needed", handler.calls == [], str(handler.calls))
 
 # a file that changed on the device must not be served from the old copy
 panel._items_by_name["clip.mp4"]['size'] = huge + 17
-payload = panel.drag_out_payload()
-check("a stale copy is not reused", payload is None, str(payload))
+payload = drag_payload()
+check("a stale copy is not reused", payload == [], str(payload))
 
 select_by_name("small.jpg")
 handler.calls.clear()
-payload = panel.drag_out_payload()
+payload = drag_payload()
 check("a small item is still fetched on the spot",
       payload and payload[0].endswith("small.jpg"), str(payload))
 shutil.rmtree(scratch, ignore_errors=True)
@@ -642,7 +647,7 @@ handler.delete_item = lambda path, is_dir=False, missing_ok=False: (
 with open(os.path.join(scratch, "gone.jpg"), 'wb') as handle:
     handle.write(b'x' * 2048)
 select_by_name("gone.jpg")
-payload = panel.drag_out_payload()
+payload = drag_payload()
 check("the file was handed to the drag", bool(payload), str(payload))
 
 os.remove(os.path.join(scratch, "gone.jpg"))       # the receiver moved it away
@@ -750,9 +755,9 @@ handler.pull_items = fake_pull_big
 handler.calls.clear()
 select_by_name("movie.mp4")
 
-check("the drag cannot carry it", panel.drag_out_payload() is None)
+check("the drag cannot carry it", drag_payload() == [])
 check("and the panel says it will be fetched",
-      "fetched" in panel.status_label.text().lower(), panel.status_label.text())
+      "drag again" in panel.status_label.text().lower(), panel.status_label.text())
 
 # this is what letting go over the PC now does: no question, just the work
 panel.offer_download_after_drag(["/sdcard/Pictures/movie.mp4"])
@@ -765,7 +770,7 @@ check("and then says it is ready", "ready" in panel.status_label.text().lower(),
       panel.status_label.text())
 
 handler.calls.clear()
-payload = panel.drag_out_payload()
+payload = drag_payload()
 check("the next drag carries it", payload and payload[0].endswith("movie.mp4"),
       str(payload))
 check("with no second fetch", handler.calls == [], str(handler.calls))

@@ -323,66 +323,47 @@ check("clipboard timestamp was reset", panel._clipboard_time == 0.0)
 check("the file moved", names_at(f"{BASE}/into") == ["cutme.txt"], str(names_at(f"{BASE}/into")))
 check("the source copy is gone", "cutme.txt" not in (names_at(BASE) or []))
 
-print("\n=== 13. a drag carries real files when the selection is small ===")
+print("\n=== 13. the drag hands files over when the receiver asks ===")
 goto(BASE)
 select("into")
+import shutil
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QDrag
+from ui.views import DeviceFiles
 
-dragged = {}
+shutil.rmtree(transfer.temp_transfer_dir(panel.device_serial), ignore_errors=True)
+scratch = transfer.temp_transfer_dir(panel.device_serial)
+
+carried = {}
 real_exec = QDrag.exec
 
 
 def capture_drag(self, *args, **kwargs):
     mime = self.mimeData()
-    dragged['urls'] = [u.toLocalFile() for u in mime.urls()]
-    dragged['adb'] = mime.hasFormat('application/x-adb-paths')
+    carried['mime'] = mime
+    carried['offers_files'] = mime.hasFormat("text/uri-list")
+    carried['adb'] = mime.hasFormat('application/x-adb-paths')
+    carried['fetched_yet'] = mime.fetched
     return Qt.DropAction.IgnoreAction
 
 
 QDrag.exec = capture_drag
 panel.tree_view.startDrag(Qt.DropAction.CopyAction)
+QDrag.exec = real_exec
+
 check("the drag offers the item to other apps on the PC",
-      bool(dragged.get('urls')), str(dragged.get('urls')))
+      carried.get('offers_files') is True)
 check("and still carries the internal format for panel-to-panel drops",
-      dragged.get('adb') is True)
+      carried.get('adb') is True)
+check("nothing was fetched while the drag was moving",
+      carried.get('fetched_yet') is False)
 
-# A selection past the limit must not stall the drag while it is fetched,
-# and the gesture must not simply die either: letting go of it outside the
-# app offers to prepare or download it.
-import shutil
-
-shutil.rmtree(transfer.temp_transfer_dir(panel.device_serial), ignore_errors=True)
-dragged.clear()
-offered = []
-real_size = panel.selection_size
-real_offer = panel.offer_download_after_drag
-panel.selection_size = lambda timeout=20: transfer.DRAG_OUT_SIZE_LIMIT + 1
-panel.offer_download_after_drag = lambda paths: offered.append(list(paths))
-panel.tree_view.startDrag(Qt.DropAction.CopyAction)
-panel.selection_size = real_size
-QDrag.exec = real_exec
-check("a large selection is not fetched for the drag", not dragged.get('urls'),
-      str(dragged.get('urls')))
-check("and the panel says what will happen instead",
-      "fetched" in panel.status_label.text().lower(), panel.status_label.text())
-check("letting go outside the app offers a way through",
-      offered and offered[0], str(offered))
-panel.offer_download_after_drag = real_offer
-
-# once prepared, the same selection drags however large it is
-prepared = transfer.temp_transfer_dir(panel.device_serial)
-with open(os.path.join(prepared, "into"), "wb") as handle:
-    handle.write(b"")
-dragged.clear()
-QDrag.exec = capture_drag
-panel.selection_size = lambda timeout=20: transfer.DRAG_OUT_SIZE_LIMIT + 1
-panel.tree_view.startDrag(Qt.DropAction.CopyAction)
-panel.selection_size = real_size
-QDrag.exec = real_exec
-check("a prepared item is carried whatever the limit says",
-      bool(dragged.get('urls')), str(dragged.get('urls')))
-shutil.rmtree(prepared, ignore_errors=True)
+# what a receiver does on the drop
+urls = [u.toLocalFile() for u in carried['mime'].urls()]
+check("reading the drop data fetches the real item", bool(urls), str(urls))
+check("and it is on disk afterwards",
+      bool(urls) and os.path.exists(urls[0]), str(urls))
+shutil.rmtree(scratch, ignore_errors=True)
 
 print("\n=== 14. '..' is never treated as a selectable item ===")
 goto(f"{BASE}/into")

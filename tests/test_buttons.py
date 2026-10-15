@@ -20,7 +20,7 @@ os.chdir(ROOT)
 from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog,
                              QMenu, QPushButton,
                              QToolButton)
-from PyQt6.QtGui import QStandardItem
+from PyQt6.QtGui import QDrag, QStandardItem
 from PyQt6.QtCore import QItemSelectionModel, QPoint, Qt
 from PyQt6.QtTest import QTest
 
@@ -770,6 +770,95 @@ check("the next drag carries it", payload and payload[0].endswith("movie.mp4"),
       str(payload))
 check("with no second fetch", handler.calls == [], str(handler.calls))
 _sh.rmtree(scratch, ignore_errors=True)
+
+print("\n=== 20. the drag hands over files only when they are asked for ===")
+# Windows wants paths before the drag starts, which is why a large selection
+# could not be dragged out at all. The data is produced on demand instead,
+# so the drag always begins at once and the bytes are fetched at the drop.
+import shutil as _sh2
+from ui import transfer as _tr2
+from ui.views import DeviceFiles
+
+scratch = _tr2.temp_transfer_dir(handler.device_serial)
+_sh2.rmtree(scratch, ignore_errors=True)
+scratch = _tr2.temp_transfer_dir(handler.device_serial)
+
+panel.refresh_files = lambda *a, **k: None
+panel.tree_model.clear()
+panel.tree_model.setHorizontalHeaderLabels(
+    ['Name', 'Type', 'Size', 'Permissions', 'Modified'])
+panel._items_by_name = {}
+panel.current_path = "/sdcard/Pictures"
+enormous = 900 * 1024 * 1024
+panel.tree_model.appendRow([
+    QStandardItem("huge.mp4"), QStandardItem("File"), QStandardItem(str(enormous)),
+    QStandardItem("-rw-"), QStandardItem("2026-01-01 10:00")])
+panel._items_by_name["huge.mp4"] = {
+    'name': "huge.mp4", 'path': "/sdcard/Pictures/huge.mp4", 'size': enormous,
+    'modified': "2026-01-01 10:00", 'is_dir': False,
+    'item': panel.tree_model.item(0, 0)}
+app.processEvents()
+
+
+def fake_pull_huge(remote_paths, local_dir, line_callback=None):
+    handler.calls.append(('pull_items', list(remote_paths), local_dir))
+    for remote in remote_paths:
+        name = remote.rstrip('/').split('/')[-1]
+        with open(os.path.join(local_dir, name), 'wb') as handle:
+            handle.truncate(panel._items_by_name[name]['size'])
+    return True
+
+
+handler.pull_items = fake_pull_huge
+handler.calls.clear()
+select_by_name("huge.mp4")
+
+carried = {}
+real_exec = QDrag.exec
+
+
+def capture(self, *args, **kwargs):
+    mime = self.mimeData()
+    carried['advertises_files'] = mime.hasFormat("text/uri-list")
+    carried['fetched_during_drag'] = bool(handler.calls)
+    carried['mime'] = mime
+    return Qt.DropAction.CopyAction
+
+
+QDrag.exec = capture
+panel.tree_view.startDrag(Qt.DropAction.CopyAction | Qt.DropAction.MoveAction)
+QDrag.exec = real_exec
+
+check("the drag advertises files however large they are",
+      carried.get('advertises_files') is True, str(carried.get('advertises_files')))
+check("nothing is fetched while the drag is still moving",
+      carried.get('fetched_during_drag') is False, str(handler.calls))
+check("so a 900 MB video can be dragged at all",
+      isinstance(carried.get('mime'), DeviceFiles))
+
+# this is what the receiver does when the drop lands
+mime = carried['mime']
+urls = mime.urls()
+check("the files arrive when the receiver reads them",
+      [u.toLocalFile().replace('/', os.sep) for u in urls]
+      == [os.path.join(scratch, "huge.mp4")],
+      str([u.toLocalFile() for u in urls]))
+check("which is when the fetch ran", bool(handler.calls), str(handler.calls))
+check("and the drag knows it handed something over", mime.fetched is True)
+
+handler.calls.clear()
+check("reading again does not fetch again", bool(mime.urls()) and handler.calls == [],
+      str(handler.calls))
+
+# an internal drop must never pull anything
+handler.calls.clear()
+second = DeviceFiles(panel, ["huge.mp4"], panel.fetch_for_drag)
+second.setData("application/x-adb-paths", b"TESTDEVICE\n/sdcard/Pictures/huge.mp4")
+check("an internal drag reads the device format, not the files",
+      second.hasFormat("application/x-adb-paths") and second.fetched is False)
+check("and asking what it offers fetches nothing",
+      "text/uri-list" in second.formats() and handler.calls == [], str(handler.calls))
+_sh2.rmtree(scratch, ignore_errors=True)
 
 print(f"\n{'=' * 60}\nPASSED {len(PASS)}  FAILED {len(FAIL)}")
 if FAIL:

@@ -768,6 +768,33 @@ class TransferActionsMixin:
             ready.append(local)
         return ready, missing
 
+    def fetch_for_drag(self, names):
+        """Produce the files a receiver has just asked the drag for.
+
+        This runs at the moment of the drop, so there is no gesture left to
+        stall: the wait belongs to the copy the user asked for, and Windows
+        shows its own progress for it. Anything already prepared is handed
+        over as it stands.
+        """
+        if not names or not self.adb_handler.device_connected:
+            return []
+
+        folder = transfer.temp_transfer_dir(self.device_serial)
+        ready, missing = self._prepared_paths(names)
+        if missing:
+            self._note(f"Fetching {len(missing)} item(s) for the drop...")
+            self.adb_handler.pull_items([self._remote_path(n) for n in missing],
+                                        folder)
+            ready, missing = self._prepared_paths(names)
+
+        if ready:
+            transfer.trim_folder(folder, transfer.SCRATCH_LIMIT, keep=ready)
+            self._record_handover(names)
+            self._note(f"Handed {len(ready)} item(s) to the PC")
+        elif missing:
+            self._report_error("Could not fetch the items for the drop")
+        return ready
+
     def drag_out_payload(self):
         """Put the selection on disk so the drag can also be dropped on the PC.
 

@@ -43,22 +43,25 @@ parts company with Explorer, where pressing an unselected file selects it and
 drags it in one motion; here that gesture is kept for selecting.
 
 Dragging out to Explorer, the desktop, or anything else that takes files
-copies them there. Windows needs those files on disk before the drag begins,
-which is the one real limit here: a selection under 48 MB is fetched as the
-drag starts, and a larger one cannot be, so the cursor refuses the drop.
+copies them there, whatever the selection weighs. Windows wants a list of
+real files before a drag begins, which is awkward when the files are on a
+phone - so the drag advertises them straight away and fetches the bytes only
+if something actually takes them, which happens when you let go. The drag
+therefore starts instantly, the cursor behaves normally, and `Ctrl` and
+`Shift` work as they do anywhere else; the wait, if there is one, belongs to
+the copy you asked for and Windows shows its own progress for it.
 
-Letting such a drag go over the PC fetches the items there and then, with
-progress and a Cancel button, and says when they are ready; dragging them
-again works immediately, however large they are. The same command is in the
-right-click menu as "Prepare for dragging to the PC", for doing it in
-advance, and `Ctrl+E` sends them straight to a folder instead.
+Dropping back into a panel never fetches anything: those drops read the
+app's own format and the files stay on the device.
 
-What has been fetched stays ready until the app closes, so each selection is
-paid for once. A file that has changed on the device since is fetched again
-rather than being handed over stale, and the scratch folder is kept under
-4 GB by dropping what was used least recently (`ADB_EXPLORER_SCRATCH_LIMIT_MB`
-to change that). Thumbnails are capped the same way at 512 MB
-(`ADB_EXPLORER_THUMB_CACHE_MB`), trimmed when the app starts. If the place you drop into asks for a
+"Prepare for dragging to the PC" in the right-click menu fetches a selection
+in advance, with progress and a Cancel button, so the drop itself is
+instant. What has been fetched stays ready until the app closes, so each
+selection is paid for once; a file that has changed on the device since is
+fetched again rather than handed over stale. The scratch folder is kept
+under 4 GB by dropping what was used least recently
+(`ADB_EXPLORER_SCRATCH_LIMIT_MB` to change that), and thumbnails are capped
+the same way at 512 MB (`ADB_EXPLORER_THUMB_CACHE_MB`), trimmed at startup. If the place you drop into asks for a
 move rather than a copy, the files are copied first and the panel then asks
 before deleting the originals from the phone.
 
@@ -161,9 +164,8 @@ read, the transfer stops instead of assuming the folder is empty.
 - Select what you want and press **↓ To PC** in the panel's toolbar, which
   asks where to put it. This is the same as `Ctrl+E` and as right-click >
   Download to PC, and it handles folders as well as files.
-- Drag items out onto the desktop, Explorer or any app that takes files. A
-  selection under 48 MB is fetched as the drag begins; a larger one is
-  prepared once on request and then drags instantly (see Dragging).
+- Drag items out onto the desktop, Explorer or any app that takes files, at
+  any size: the bytes are fetched when you let go, not before (see Dragging).
 - `Ctrl+Shift+C` puts the selection on the PC clipboard, then paste in Explorer
 - `Ctrl+E` or right-click > Download to PC for a chosen folder (any size)
 - Double-click a file to open it on the PC

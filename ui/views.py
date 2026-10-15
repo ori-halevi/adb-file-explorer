@@ -71,6 +71,57 @@ def thumbnail_px(mode):
     return THUMBNAIL_PX.get(mode)
 
 
+class DeviceFiles(QMimeData):
+    """Drag data that fetches the files only if the receiver asks for them.
+
+    Windows wants a list of real paths before a drag begins, which is why a
+    large selection could not be dragged out: fetching it inside the gesture
+    was not possible. Qt asks a QMimeData subclass for its data the moment a
+    receiver reads it, so the drag can advertise the files immediately - the
+    cursor behaves normally, Ctrl and Shift do what they always do - and the
+    bytes are fetched when the drop happens, which is the point at which the
+    user has asked for them.
+
+    Dropping back into the app never touches this: those drops read the
+    internal format instead, so nothing is fetched.
+    """
+
+    URI_LIST = "text/uri-list"
+
+    def __init__(self, panel, names, payload):
+        super().__init__()
+        self._panel = panel
+        self._names = list(names)
+        self._payload = payload          # callable(names) -> list of local paths
+        self._urls = None
+        self.fetched = False
+
+    def formats(self):
+        formats = list(super().formats())
+        if self.URI_LIST not in formats:
+            formats.append(self.URI_LIST)
+        return formats
+
+    def hasFormat(self, mime_type):
+        if mime_type == self.URI_LIST:
+            return bool(self._names)
+        return super().hasFormat(mime_type)
+
+    def retrieveData(self, mime_type, preferred_type):
+        if mime_type != self.URI_LIST:
+            return super().retrieveData(mime_type, preferred_type)
+
+        if self._urls is None:
+            self._urls = []
+            try:
+                for path in self._payload(self._names) or []:
+                    self._urls.append(QUrl.fromLocalFile(path))
+            except Exception:
+                self._urls = []
+            self.fetched = True
+        return self._urls
+
+
 class DropMixin:
     """Drag-and-drop shared by every file view.
 
@@ -374,19 +425,11 @@ class DropMixin:
         if not paths:
             return
 
-        md = QMimeData()
+        names = [p.rstrip('/').split('/')[-1] for p in paths]
+        md = DeviceFiles(self.main_window, names, self.main_window.fetch_for_drag)
         md.setData(ADB_MIME, "\n".join([serial] + paths).encode("utf-8"))
         if right_button:
             md.setData(ADB_RIGHT_MIME, b"1")
-
-        # Real file URLs are what let a selection be dropped on the desktop or
-        # in Explorer, and they only exist once the files have been fetched.
-        # Small selections are fetched here so dragging out simply works;
-        # a large one would stall the drag, so it keeps the internal format
-        # only and the panel says what to use instead.
-        local_paths = self.main_window.drag_out_payload()
-        if local_paths:
-            md.setUrls([QUrl.fromLocalFile(p) for p in local_paths])
 
         drag = QDrag(self)
         drag.setMimeData(md)
@@ -396,14 +439,14 @@ class DropMixin:
         result = drag.exec(Qt.DropAction.CopyAction | Qt.DropAction.MoveAction,
                            default)
 
-        if local_paths:
-            # Dropped outside this application: whoever took the files has
-            # copied them already, so a move only has the originals to remove.
-            if drag.target() is None and result == Qt.DropAction.MoveAction:
+        if md.fetched and drag.target() is None:
+            # The receiver took the files. A move means it has deleted its
+            # copy, so only the originals are left to remove.
+            if result == Qt.DropAction.MoveAction:
                 self.main_window.confirm_move_to_pc(paths)
-        elif drag.target() is None and self._ended_outside_the_app():
-            # Nothing could be carried, and the drag ended somewhere else -
-            # so offer the transfer that does work at any size.
+        elif not md.fetched and drag.target() is None and self._ended_outside_the_app():
+            # Nothing was ever asked for, so the drop was refused or the drag
+            # was abandoned; offer the transfer that always works.
             self.main_window.offer_download_after_drag(paths)
 
     @staticmethod

@@ -265,10 +265,10 @@ check("Ctrl copies in an icon view too",
 check("an icon view reports selected rows",
       hasattr(list_view, 'selected_rows'))
 
-print("\n=== 8. the two buttons start two different gestures ===")
-# The left button drags. The right button drags only what is already
-# selected, and anywhere else it keeps its other job - sweeping out a
-# selection - which is how several items get picked in the first place.
+print("\n=== 8. a drag starts from the selection, with either button ===")
+# Pressing and sweeping is how several items get picked, so a drag may only
+# begin on something already selected. Otherwise a quick flick across a few
+# files would drag one of them instead of selecting them.
 from PyQt6.QtCore import QEvent, QItemSelectionModel
 from PyQt6.QtGui import QMouseEvent
 
@@ -277,9 +277,9 @@ view.startDrag = lambda actions, right_button=False: started.append(
     {'right': right_button})
 
 
-def press(button, point):
+def press(button, point, modifiers=Qt.KeyboardModifier.NoModifier):
     event = QMouseEvent(QEvent.Type.MouseButtonPress, QPointF(point), QPointF(point),
-                        button, button, Qt.KeyboardModifier.NoModifier)
+                        button, button, modifiers)
     ALIVE.append(event)
     view.mousePressEvent(event)
 
@@ -308,43 +308,44 @@ def select_rows(*rows):
     app.processEvents()
 
 
-row_one = view.visualRect(model.index(1, 0)).center()
-row_two = view.visualRect(model.index(2, 0)).center()
+def drag_from(button, row, selected_rows):
+    """Run the whole gesture, reporting what happened while it was running."""
+    select_rows(*selected_rows)
+    started.clear()
+    point = view.visualRect(model.index(row, 0)).center()
+    press(button, point)
+    move(button, point + QPoint(70, 70))
+    outcome = list(started)
+    could_drag = view.dragEnabled()
+    release(button, point + QPoint(70, 70))
+    return outcome, could_drag
 
-started.clear()
-select_rows(1, 2)
-before = [model.data(i) for i in view.selected_rows()]
-press(Qt.MouseButton.RightButton, row_one)
-move(Qt.MouseButton.RightButton, row_one + QPoint(60, 60))
-check("right-dragging something already selected starts the asking drag",
-      started and started[0]['right'] is True, str(started))
-check("and the whole selection comes with it",
-      [model.data(i) for i in view.selected_rows()] == before,
-      str([model.data(i) for i in view.selected_rows()]))
-release(Qt.MouseButton.RightButton, row_one + QPoint(60, 60))
 
-started.clear()
-select_rows(4)
-press(Qt.MouseButton.RightButton, row_one)
-move(Qt.MouseButton.RightButton, row_one + QPoint(60, 60))
-check("right-dragging something not selected starts no drag", started == [],
-      str(started))
-check("the view may sweep out a selection instead", view.dragEnabled() is False)
-release(Qt.MouseButton.RightButton, row_one + QPoint(60, 60))
-check("dragging is available again once the sweep ends", view.dragEnabled() is True)
+for button, label, asks in ((Qt.MouseButton.LeftButton, "left", False),
+                            (Qt.MouseButton.RightButton, "right", True)):
+    outcome, _ = drag_from(button, 1, (1, 2))
+    check(f"a {label}-drag from a selected item starts a drag",
+          len(outcome) == 1, str(outcome))
+    check(f"and it {'asks on release' if asks else 'does not ask'}",
+          outcome and outcome[0]['right'] is asks, str(outcome))
+    check(f"the whole selection travels with a {label}-drag",
+          [model.data(i) for i in view.selected_rows()] == ["a.jpg", "b.jpg"],
+          str([model.data(i) for i in view.selected_rows()]))
 
-started.clear()
+    outcome, could_drag = drag_from(button, 1, (2,))
+    check(f"a {label}-drag from an unselected item starts no drag",
+          outcome == [], str(outcome))
+    check(f"the view sweeps instead, with its own dragging held off",
+          could_drag is False)
+    check(f"dragging is available again once a {label} sweep ends",
+          view.dragEnabled() is True)
+
 select_rows(1)
-press(Qt.MouseButton.LeftButton, row_one)
-move(Qt.MouseButton.LeftButton, row_one + QPoint(60, 60))
-check("a left-drag never asks", not [s for s in started if s['right']], str(started))
-release(Qt.MouseButton.LeftButton, row_one + QPoint(60, 60))
-
 started.clear()
-select_rows(2)
-press(Qt.MouseButton.RightButton, row_two)
-release(Qt.MouseButton.RightButton, row_two)
-check("a right click that does not move starts no drag", started == [], str(started))
+point = view.visualRect(model.index(1, 0)).center()
+press(Qt.MouseButton.LeftButton, point)
+release(Qt.MouseButton.LeftButton, point)
+check("a click that does not move starts no drag", started == [], str(started))
 
 del view.startDrag
 

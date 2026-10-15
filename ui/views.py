@@ -277,51 +277,82 @@ class DropMixin:
     # ---------------------------------------------------------------- dragging
 
     def mousePressEvent(self, event):
-        """The two buttons start two different gestures.
+        """Both buttons drag only what is already selected.
 
-        The left button is Qt's ordinary drag, which copies or moves. The
-        right button starts a drag that asks on release instead, so it is
-        tracked here rather than handed to the base class - but the item
-        under the cursor still becomes the selection first, otherwise the
-        drag would carry whatever happened to be selected before.
+        Pressing on an item that is part of the selection begins a drag of
+        the whole selection. Pressing anywhere else leaves the button to its
+        other job, sweeping out a selection, which is how several items get
+        picked in the first place.
+
+        The press itself still goes to the view, so clicking, Ctrl-clicking
+        and Shift-clicking keep working - including the way a click on a
+        selected item only collapses the selection when the button comes back
+        up, which is what lets a drag start from several items.
         """
         self._end_sweep()
-        if event.button() == Qt.MouseButton.RightButton:
-            index = self.indexAt(event.position().toPoint())
-            selected = {i.row() for i in self.selected_rows()}
-            if index.isValid() and index.row() in selected:
-                # Grabbing something already selected drags it, together with
-                # everything selected alongside it.
-                self._right_press = event.position().toPoint()
+        self._press_button = event.button()
+        self._press_pos = event.position().toPoint()
+
+        index = self.indexAt(self._press_pos)
+        self._press_on_selection = (
+            index.isValid() and index.row() in {i.row() for i in self.selected_rows()})
+
+        if self._press_button == Qt.MouseButton.RightButton:
+            if self._press_on_selection:
+                # The view has no use for a right press on the selection, and
+                # handing it over would only move the current item about.
                 event.accept()
                 return
-            # Anywhere else the right button keeps its other use: sweeping
-            # out a selection, which is how several items get picked in the
-            # first place. The view would otherwise start a drag of its own
-            # on any button, so dragging is switched off for this gesture.
-            self._sweeping = True
-            self.setDragEnabled(False)
+            self._begin_sweep()
+        elif not self._press_on_selection:
+            self._begin_sweep()
 
-        self._right_press = None
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        start = getattr(self, '_right_press', None)
-        if start is not None:
-            if not (event.buttons() & Qt.MouseButton.RightButton):
-                self._right_press = None
-            elif (event.position().toPoint() - start).manhattanLength() >= \
-                    QApplication.startDragDistance():
-                self._right_press = None
-                self.startDrag(Qt.DropAction.CopyAction | Qt.DropAction.MoveAction,
-                               right_button=True)
-            return
+        button = getattr(self, '_press_button', None)
+
+        if button is not None and event.buttons():
+            moved = (event.position().toPoint() - self._press_pos).manhattanLength()
+            far_enough = moved >= QApplication.startDragDistance()
+
+            if self._press_on_selection and far_enough:
+                # Start the drag here rather than leaving it to the view,
+                # which only begins one while the cursor is still over the
+                # item that was pressed - a quick flick would otherwise turn
+                # into a selection sweep.
+                self._press_button = None
+                self._drag_took_over = True
+                self.startDrag(
+                    Qt.DropAction.CopyAction | Qt.DropAction.MoveAction,
+                    right_button=(button == Qt.MouseButton.RightButton))
+                self.setState(QAbstractItemView.State.NoState)
+                return
+
+            if button == Qt.MouseButton.RightButton and self._press_on_selection:
+                return
+
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        self._right_press = None
+        self._press_button = None
+        self._press_on_selection = False
         self._end_sweep()
+
+        if getattr(self, '_drag_took_over', False):
+            # The drag swallowed this gesture. Handing the release on would
+            # let the view collapse the selection to whatever sits under the
+            # cursor now, which is not where the drag began.
+            self._drag_took_over = False
+            event.accept()
+            return
+
         super().mouseReleaseEvent(event)
+
+    def _begin_sweep(self):
+        """Let the view select freely, without starting a drag part-way."""
+        self._sweeping = True
+        self.setDragEnabled(False)
 
     def _end_sweep(self):
         if getattr(self, '_sweeping', False):

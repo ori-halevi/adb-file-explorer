@@ -31,10 +31,16 @@ work here:
 | `Ctrl` + drag | Copy, wherever it is dropped |
 | `Shift` + drag | Move, wherever it is dropped |
 | Drag with the **right button**, from something already selected | A menu on release: Copy here, Move here, Cancel - the action that would have happened is in bold |
-| Drag with the **right button**, from anywhere else | Sweeps out a selection, which is how several items get picked in the first place |
 
 The cursor shows which it will be while you drag, because the panel accepts
 the drag with that action and the system draws the matching cursor.
+
+A drag only begins on an item that is **already selected**, and it then
+carries the whole selection. Pressing anywhere else - an item that is not
+selected, or empty space - sweeps out a selection instead, which is how
+several items get picked in the first place. This is the one place the app
+parts company with Explorer, where pressing an unselected file selects it and
+drags it in one motion; here that gesture is kept for selecting.
 
 Dragging out to Explorer, the desktop, or anything else that takes files
 copies them there. A selection under 24 MB is fetched as the drag starts, so

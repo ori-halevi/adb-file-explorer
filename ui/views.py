@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QListView, QMenu, QMessageBox, QStyle,
     QStyledItemDelegate, QStyleOptionViewItem, QTreeView,
 )
-from PyQt6.QtCore import QMimeData, QSize, Qt, QUrl
+from PyQt6.QtCore import QItemSelectionModel, QMimeData, QSize, Qt, QUrl
 from PyQt6.QtGui import (QColor, QDrag, QFontMetrics, QGuiApplication, QIcon,
                          QPainter, QPixmap)
 
@@ -277,20 +277,37 @@ class DropMixin:
     # ---------------------------------------------------------------- dragging
 
     def mousePressEvent(self, event):
+        """The two buttons start two different gestures.
+
+        The left button is Qt's ordinary drag, which copies or moves. The
+        right button starts a drag that asks on release instead, so it is
+        tracked here rather than handed to the base class - but the item
+        under the cursor still becomes the selection first, otherwise the
+        drag would carry whatever happened to be selected before.
+        """
         if event.button() == Qt.MouseButton.RightButton:
             index = self.indexAt(event.position().toPoint())
             if index.isValid():
-                # Remember where a right-drag might begin. The context menu
-                # still opens if the button is released without moving.
+                if index.row() not in {i.row() for i in self.selected_rows()}:
+                    self.selectionModel().select(
+                        index,
+                        QItemSelectionModel.SelectionFlag.ClearAndSelect
+                        | QItemSelectionModel.SelectionFlag.Rows)
+                self.selectionModel().setCurrentIndex(
+                    index, QItemSelectionModel.SelectionFlag.NoUpdate)
                 self._right_press = event.position().toPoint()
+                event.accept()
                 return
+
         self._right_press = None
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
         start = getattr(self, '_right_press', None)
-        if start is not None and (event.buttons() & Qt.MouseButton.RightButton):
-            if (event.position().toPoint() - start).manhattanLength() >= \
+        if start is not None:
+            if not (event.buttons() & Qt.MouseButton.RightButton):
+                self._right_press = None
+            elif (event.position().toPoint() - start).manhattanLength() >= \
                     QApplication.startDragDistance():
                 self._right_press = None
                 self.startDrag(Qt.DropAction.CopyAction | Qt.DropAction.MoveAction,

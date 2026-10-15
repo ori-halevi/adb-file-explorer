@@ -62,8 +62,16 @@ The right-click menu follows what is under the cursor:
 - **several items** - the same, with Batch rename in place of Rename
 
 Right-clicking an item outside the current selection moves the selection to
-it first, so the menu always acts on what was clicked. Columns in Details
-sort when their header is clicked, and the sort choice is remembered.
+it first, so the menu always acts on what was clicked.
+
+## Sorting
+The toolbar's sort button shows what the list is sorted by and in which
+direction, and its menu offers Name, Size, Type and Date modified, each way
+round. The same choices are in the right-click menu, and a column header in
+Details sorts by that column. The choice is remembered between runs.
+
+Folders are always listed before files, and the sort runs inside each of the
+two groups separately, as it does in Explorer.
 
 ## Looking at files
 The app is dark by default; View > Dark Mode switches it and the choice is

@@ -123,6 +123,7 @@ class DevicePanel(TransferActionsMixin, QWidget):
         self.sort_key = self._settings().value("sort_key", "name", type=str)
         self.sort_desc = self._settings().value("sort_desc", False, type=bool)
         self._update_sort_indicator()
+        self._update_sort_button()
         self.update_path_display()
 
     @property
@@ -204,6 +205,12 @@ class DevicePanel(TransferActionsMixin, QWidget):
         self.from_pc_btn.clicked.connect(lambda: self.upload_file_to_device())
         nav_layout.addWidget(self.from_pc_btn)
 
+        self.sort_btn = QToolButton()
+        self.sort_btn.setObjectName("sort_btn")
+        self.sort_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.sort_btn.setMenu(self._build_sort_menu())
+        nav_layout.addWidget(self.sort_btn)
+
         self.view_btn = QToolButton()
         self.view_btn.setText("▦")
         self.view_btn.setToolTip("Change the view (Ctrl+1 to Ctrl+8, or Ctrl+wheel)")
@@ -282,6 +289,44 @@ class DevicePanel(TransferActionsMixin, QWidget):
         needs no changes anywhere but here.
         """
         return self._view_stack.currentWidget()
+
+    SORT_ARROWS = {False: "\u2191", True: "\u2193"}
+
+    def _build_sort_menu(self):
+        """Explorer's Sort menu: the field, then the direction."""
+        menu = QMenu(self)
+        self._sort_actions = {}
+        for key, label in self.SORT_LABELS:
+            action = menu.addAction(label)
+            action.setCheckable(True)
+            action.triggered.connect(lambda checked=False, k=key: self.set_sort(k))
+            self._sort_actions[key] = action
+
+        menu.addSeparator()
+        self._order_actions = {}
+        for descending, label in ((False, "Ascending"), (True, "Descending")):
+            action = menu.addAction(label)
+            action.setCheckable(True)
+            action.triggered.connect(
+                lambda checked=False, d=descending: self.set_sort(self.sort_key, d))
+            self._order_actions[descending] = action
+
+        menu.addSeparator()
+        note = menu.addAction("Folders are always listed first")
+        note.setEnabled(False)
+        return menu
+
+    def _update_sort_button(self):
+        label = dict(self.SORT_LABELS).get(self.sort_key, "Name")
+        arrow = self.SORT_ARROWS[bool(self.sort_desc)]
+        self.sort_btn.setText(f"{arrow} {label}")
+        self.sort_btn.setToolTip(
+            f"Sorted by {label.lower()}, "
+            f"{'Z to A' if self.sort_desc else 'A to Z'} - click to change")
+        for key, action in getattr(self, '_sort_actions', {}).items():
+            action.setChecked(key == self.sort_key)
+        for descending, action in getattr(self, '_order_actions', {}).items():
+            action.setChecked(descending == bool(self.sort_desc))
 
     def _build_view_menu(self):
         menu = QMenu(self)
@@ -704,7 +749,8 @@ class DevicePanel(TransferActionsMixin, QWidget):
             if self.sort_key == 'size':
                 return (0 if item.is_dir else 1, item.size, item.name.lower())
             if self.sort_key == 'date':
-                return (0 if item.is_dir else 1, item.date_modified, item.name.lower())
+                return (0 if item.is_dir else 1, self._sortable_date(item.date_modified),
+                        item.name.lower())
             if self.sort_key == 'type':
                 extension = os.path.splitext(item.name)[1].lower()
                 return (0 if item.is_dir else 1, extension, item.name.lower())
@@ -715,6 +761,30 @@ class DevicePanel(TransferActionsMixin, QWidget):
         rest = sorted([f for f in files if not f.is_dir], key=key,
                       reverse=self.sort_desc)
         return folders + rest
+
+    MONTHS = {m: f"{i + 1:02d}" for i, m in enumerate(
+        ("jan", "feb", "mar", "apr", "may", "jun",
+         "jul", "aug", "sep", "oct", "nov", "dec"))}
+
+    @classmethod
+    def _sortable_date(cls, text):
+        """Make both date styles a device can print sort chronologically.
+
+        Most report "2026-01-02 10:00", which already sorts, but a busybox
+        shell prints "Jan 2 10:00" or "Jan 2 2026", which would sort
+        alphabetically by month name.
+        """
+        if not text:
+            return ""
+        parts = text.split()
+        month = cls.MONTHS.get(parts[0][:3].lower()) if parts else None
+        if month is None:
+            return text
+        day = parts[1].zfill(2) if len(parts) > 1 else "00"
+        rest = parts[2] if len(parts) > 2 else ""
+        if ":" in rest:                       # this year, time given
+            return f"9999-{month}-{day} {rest}"
+        return f"{rest or '0000'}-{month}-{day}"
 
     def set_sort(self, key, descending=None):
         if descending is None:
@@ -727,6 +797,7 @@ class DevicePanel(TransferActionsMixin, QWidget):
             self.apply_search_filter()
 
     def _update_sort_indicator(self):
+        self._update_sort_button()
         header = self._tree.header()
         column = next((c for c, k in self.SORT_COLUMNS.items() if k == self.sort_key), 0)
         header.setSortIndicator(

@@ -265,6 +265,83 @@ check("Ctrl copies in an icon view too",
 check("an icon view reports selected rows",
       hasattr(list_view, 'selected_rows'))
 
+print("\n=== 8. the two buttons start two different gestures ===")
+# The right button opens a menu on release; the left one copies or moves.
+# Earlier the right-drag carried whatever had been selected before, because
+# grabbing an item did not select it first.
+from PyQt6.QtCore import QEvent
+from PyQt6.QtGui import QMouseEvent
+from PyQt6.QtCore import QItemSelectionModel
+
+started = []
+view.startDrag = lambda actions, right_button=False: started.append(
+    {'right': right_button})
+
+
+def press(button, point):
+    event = QMouseEvent(QEvent.Type.MouseButtonPress, QPointF(point), QPointF(point),
+                        button, button, Qt.KeyboardModifier.NoModifier)
+    ALIVE.append(event)
+    view.mousePressEvent(event)
+
+
+def move(button, point):
+    event = QMouseEvent(QEvent.Type.MouseMove, QPointF(point), QPointF(point),
+                        Qt.MouseButton.NoButton, button, Qt.KeyboardModifier.NoModifier)
+    ALIVE.append(event)
+    view.mouseMoveEvent(event)
+
+
+def release(button, point):
+    event = QMouseEvent(QEvent.Type.MouseButtonRelease, QPointF(point), QPointF(point),
+                        button, Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier)
+    ALIVE.append(event)
+    view.mouseReleaseEvent(event)
+
+
+row_one = view.visualRect(model.index(1, 0)).center()
+row_two = view.visualRect(model.index(2, 0)).center()
+
+# start from a selection that is deliberately the wrong one
+view.selectionModel().select(
+    model.index(1, 0),
+    QItemSelectionModel.SelectionFlag.ClearAndSelect | QItemSelectionModel.SelectionFlag.Rows)
+
+started.clear()
+press(Qt.MouseButton.RightButton, row_two)
+check("right-pressing an unselected item selects it",
+      [model.data(i) for i in view.selected_rows()] == ["b.jpg"],
+      str([model.data(i) for i in view.selected_rows()]))
+
+move(Qt.MouseButton.RightButton, row_two + QPoint(60, 60))
+check("a right-drag starts the asking kind of drag",
+      started and started[0]['right'] is True, str(started))
+release(Qt.MouseButton.RightButton, row_two + QPoint(60, 60))
+
+started.clear()
+press(Qt.MouseButton.LeftButton, row_one)
+move(Qt.MouseButton.LeftButton, row_one + QPoint(60, 60))
+left_marked = [s for s in started if s['right']]
+check("a left-drag never asks", not left_marked, str(started))
+release(Qt.MouseButton.LeftButton, row_one + QPoint(60, 60))
+
+started.clear()
+press(Qt.MouseButton.RightButton, row_two)
+release(Qt.MouseButton.RightButton, row_two)
+check("a right click that does not move starts no drag", started == [], str(started))
+
+del view.startDrag
+
+print("\n=== 9. only a right-drag carries the marker that asks ===")
+plain = QMimeData()
+plain.setData(ADB_MIME, b"DEVICE-A\n/sdcard/a.jpg")
+ALIVE.append(plain)
+check("a left-drag's data has no asking marker",
+      not plain.hasFormat(ADB_RIGHT_MIME))
+
+asking = adb_mime(MINE, ["/sdcard/a.jpg"], right=True)
+check("a right-drag's data does", asking.hasFormat(ADB_RIGHT_MIME))
+
 print(f"\n{'=' * 60}\nPASSED {len(PASS)}  FAILED {len(FAIL)}")
 if FAIL:
     print("FAILURES:")

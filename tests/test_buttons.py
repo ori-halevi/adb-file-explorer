@@ -385,6 +385,51 @@ check("a tiny icon is not cluttered with marks", pixels(small) == pixels(tiny))
 check("videos are recognised by name", thumbnails.is_video("clip.MP4") is True)
 check("photos are not", thumbnails.is_video("photo.jpg") is False)
 
+print("\n=== 12. the sort control ===")
+check("the toolbar has a sort button", hasattr(panel, 'sort_btn'))
+panel.set_sort('name', False)
+check("it names the field and the direction",
+      "Name" in panel.sort_btn.text() and "↑" in panel.sort_btn.text(),
+      panel.sort_btn.text())
+panel.set_sort('date', True)
+check("it follows the choice",
+      "Date modified" in panel.sort_btn.text() and "↓" in panel.sort_btn.text(),
+      panel.sort_btn.text())
+labels = [a.text() for a in panel.sort_btn.menu().actions() if a.text()]
+check("the menu offers the usual fields",
+      labels[:4] == ["Name", "Size", "Type", "Date modified"], str(labels))
+check("and both directions", "Ascending" in labels and "Descending" in labels, str(labels))
+checked = [a.text() for a in panel.sort_btn.menu().actions() if a.isChecked()]
+check("what is in force is ticked", sorted(checked) == ["Date modified", "Descending"],
+      str(checked))
+check("a month-name date sorts chronologically",
+      panel._sortable_date("Jan 2 2026") < panel._sortable_date("Feb 1 2026"),
+      f"{panel._sortable_date('Jan 2 2026')} vs {panel._sortable_date('Feb 1 2026')}")
+check("an ISO date is left as it is",
+      panel._sortable_date("2026-01-02 10:00") == "2026-01-02 10:00")
+
+print("\n=== 13. folders stay first, sorted inside each group ===")
+from handler import FileItem
+
+panel.all_files = [
+    FileItem("m.txt", "/p/m.txt", False, 500, "-rw-", "2026-01-02 10:00"),
+    FileItem("a.txt", "/p/a.txt", False, 100, "-rw-", "2026-01-05 10:00"),
+    FileItem("zebra", "/p/zebra", True, 0, "drw-", "2026-01-01 10:00"),
+    FileItem("alpha", "/p/alpha", True, 0, "drw-", "2026-01-09 10:00"),
+]
+panel.refresh_files = lambda *a, **k: None
+for sort_key, expected in (
+        ('name', ["..", "alpha", "zebra", "a.txt", "m.txt"]),
+        ('size', ["..", "alpha", "zebra", "a.txt", "m.txt"]),
+        ('date', ["..", "zebra", "alpha", "m.txt", "a.txt"])):
+    panel.set_sort(sort_key, False)
+    panel.apply_search_filter()
+    app.processEvents()
+    order = [panel.tree_model.data(panel.tree_model.index(row, 0))
+             for row in range(panel.tree_model.rowCount())]
+    check(f"sorting by {sort_key} keeps folders above files",
+          order == expected, str(order))
+
 print(f"\n{'=' * 60}\nPASSED {len(PASS)}  FAILED {len(FAIL)}")
 if FAIL:
     print("FAILURES:")

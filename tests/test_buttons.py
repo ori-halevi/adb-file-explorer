@@ -602,6 +602,83 @@ check("a small item is still fetched on the spot",
       payload and payload[0].endswith("small.jpg"), str(payload))
 shutil.rmtree(scratch, ignore_errors=True)
 
+print("\n=== 17. a move out still deletes the original, even though the copy is gone ===")
+# Windows performs a move by taking the copy and deleting it. Checking for
+# that copy afterwards therefore finds nothing, which is what used to leave
+# every moved file sitting on the device.
+import shutil as _shutil
+from ui import transfer as _transfer
+
+scratch = _transfer.temp_transfer_dir(handler.device_serial)
+_shutil.rmtree(scratch, ignore_errors=True)
+scratch = _transfer.temp_transfer_dir(handler.device_serial)
+
+panel.refresh_files = lambda *a, **k: None
+panel.tree_model.clear()
+panel.tree_model.setHorizontalHeaderLabels(
+    ['Name', 'Type', 'Size', 'Permissions', 'Modified'])
+panel._items_by_name = {}
+panel.current_path = "/sdcard/Pictures"
+panel.tree_model.appendRow([
+    QStandardItem("gone.jpg"), QStandardItem("File"), QStandardItem("2048"),
+    QStandardItem("-rw-"), QStandardItem("2026-01-01 10:00")])
+panel._items_by_name["gone.jpg"] = {
+    'name': "gone.jpg", 'path': "/sdcard/Pictures/gone.jpg", 'size': 2048,
+    'modified': "2026-01-01 10:00", 'is_dir': False,
+    'item': panel.tree_model.item(0, 0)}
+panel.all_files = []
+app.processEvents()
+
+# the move asks before it deletes; answer yes without a dialog
+from PyQt6.QtWidgets import QMessageBox as _QMessageBox
+_QMessageBox.question = staticmethod(
+    lambda *args, **kwargs: _QMessageBox.StandardButton.Yes)
+
+deleted = []
+handler.sizes_of = lambda paths: {p: 2048 for p in paths}
+handler.delete_item = lambda path, is_dir=False, missing_ok=False: (
+    deleted.append(path) or True)
+
+with open(os.path.join(scratch, "gone.jpg"), 'wb') as handle:
+    handle.write(b'x' * 2048)
+select_by_name("gone.jpg")
+payload = panel.drag_out_payload()
+check("the file was handed to the drag", bool(payload), str(payload))
+
+os.remove(os.path.join(scratch, "gone.jpg"))       # the receiver moved it away
+panel.confirm_move_to_pc(["/sdcard/Pictures/gone.jpg"])
+deadline = _time.time() + 15
+while _time.time() < deadline and not deleted:
+    app.processEvents()
+    _time.sleep(0.02)
+check("the original is removed once the copy has been taken",
+      deleted == ["/sdcard/Pictures/gone.jpg"], str(deleted))
+
+# nothing was ever handed over: the original must stay
+deleted.clear()
+panel._handed_over = {}
+panel.confirm_move_to_pc(["/sdcard/Pictures/gone.jpg"])
+deadline = _time.time() + 10
+while _time.time() < deadline and "kept" not in panel.status_label.text() \
+        and "Could not" not in panel.status_label.text():
+    app.processEvents()
+    _time.sleep(0.02)
+check("an unproven copy leaves the original alone", deleted == [], str(deleted))
+
+# a copy that arrived truncated must also leave it alone
+deleted.clear()
+with open(os.path.join(scratch, "gone.jpg"), 'wb') as handle:
+    handle.write(b'x' * 7)
+panel._handed_over = {}
+panel.confirm_move_to_pc(["/sdcard/Pictures/gone.jpg"])
+deadline = _time.time() + 10
+while _time.time() < deadline and "kept" not in panel.status_label.text() \
+        and "Could not" not in panel.status_label.text():
+    app.processEvents()
+    _time.sleep(0.02)
+check("a truncated copy leaves the original alone", deleted == [], str(deleted))
+_shutil.rmtree(scratch, ignore_errors=True)
+
 print(f"\n{'=' * 60}\nPASSED {len(PASS)}  FAILED {len(FAIL)}")
 if FAIL:
     print("FAILURES:")

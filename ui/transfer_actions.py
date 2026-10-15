@@ -782,6 +782,7 @@ class TransferActionsMixin:
 
         ready, missing = self._prepared_paths(names)
         if not missing:
+            self._record_handover(names)
             self._note(f"Dragging {len(ready)} item(s) - drop them in a panel, "
                        f"or anywhere on the PC")
             return ready
@@ -803,9 +804,24 @@ class TransferActionsMixin:
 
         ready, missing = self._prepared_paths(names)
         if ready:
+            self._record_handover(names)
             self._note(f"Dragging {len(ready)} item(s) - drop them in a panel, "
                        f"or anywhere on the PC")
         return ready
+
+    def _record_handover(self, names):
+        """Note the size of each copy as it is handed to the drag.
+
+        A receiver that performs a move takes the copy and deletes it, so by
+        the time the originals are considered it may be gone. What matters is
+        that it was whole when it left here.
+        """
+        folder = transfer.temp_transfer_dir(self.device_serial)
+        self._handed_over = {}
+        for name in names:
+            local = os.path.join(folder, name)
+            if os.path.isfile(local):
+                self._handed_over[self._remote_path(name)] = os.path.getsize(local)
 
     def prepare_for_dragging(self, names=None):
         """Fetch a selection into the scratch folder, with progress.
@@ -902,6 +918,7 @@ class TransferActionsMixin:
         handler = self.adb_handler
         ctx = TransferContext([handler])
         fetched = transfer.temp_transfer_dir(self.device_serial)
+        handed = dict(getattr(self, '_handed_over', {}) or {})
 
         def run():
             outcome = TransferOutcome(len(remote_paths))
@@ -914,11 +931,15 @@ class TransferActionsMixin:
                 name = path.rstrip('/').split('/')[-1]
                 ctx.say(f"Removing {name}")
 
-                # The copy the other application took came from here, so this
-                # is what has to match before the original goes.
-                local = os.path.join(fetched, name)
+                # The copy the other application took came from here, so
+                # this is what has to match before the original goes. A move
+                # deletes that copy as it takes it, so the size noted when it
+                # was handed over counts just as well.
                 if not self.is_dir_for_path(path):
-                    if not os.path.exists(local) or os.path.getsize(local) != sizes.get(path):
+                    local = os.path.join(fetched, name)
+                    arrived = (os.path.getsize(local) if os.path.isfile(local)
+                               else handed.get(path))
+                    if arrived is None or arrived != sizes.get(path):
                         outcome.record(name, False,
                                        "the copy on the PC does not match, "
                                        "so the original was kept")

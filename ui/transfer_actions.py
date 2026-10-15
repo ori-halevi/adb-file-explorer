@@ -13,7 +13,7 @@ device-to-device sender share one set of rules:
 import os
 import time
 
-from PyQt6.QtCore import QObject, pyqtSignal
+from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 from PyQt6.QtWidgets import QDialog, QFileDialog, QMessageBox
 
 from ui import transfer
@@ -769,19 +769,28 @@ class TransferActionsMixin:
         return ready, missing
 
     def fetch_for_drag(self, names):
-        """Produce the files a receiver has just asked the drag for.
+        """Produce the files a receiver has asked the drag for.
 
-        This runs at the moment of the drop, so there is no gesture left to
-        stall: the wait belongs to the copy the user asked for, and Windows
-        shows its own progress for it. Anything already prepared is handed
-        over as it stands.
+        Windows asks for this while the drag is still in hand, not when it
+        lands, so whatever happens here holds up the pointer. Anything
+        already prepared is handed over at once, and a small remainder is
+        fetched on the spot; a large one is left to a background fetch that
+        starts as soon as the gesture is over, because pulling gigabytes
+        here would freeze the machine mid-drag.
         """
         if not names or not self.adb_handler.device_connected:
             return []
 
         folder = transfer.temp_transfer_dir(self.device_serial)
         ready, missing = self._prepared_paths(names)
+
         if missing:
+            outstanding = sum((self._items_by_name.get(n) or {}).get('size') or 0
+                              for n in missing)
+            if outstanding and outstanding > transfer.DRAG_OUT_SIZE_LIMIT:
+                self._fetch_after_gesture(names)
+                return ready
+
             self._note(f"Fetching {len(missing)} item(s) for the drop...")
             self.adb_handler.pull_items([self._remote_path(n) for n in missing],
                                         folder)
@@ -794,6 +803,34 @@ class TransferActionsMixin:
         elif missing:
             self._report_error("Could not fetch the items for the drop")
         return ready
+
+    def _fetch_after_gesture(self, names):
+        """Note that this selection has to be fetched once the drag is over.
+
+        Fetching inside a drag holds the whole desktop still - the pointer
+        belongs to the system until the gesture ends - so a large selection
+        is only marked here. The view runs it the moment the drag returns.
+        """
+        self._pending_fetch = list(names)
+        limit_mb = transfer.DRAG_OUT_SIZE_LIMIT // (1024 * 1024)
+        self._note(f"More than {limit_mb} MB to fetch - preparing it now, "
+                   f"then drag again")
+
+    def take_pending_fetch(self, run=True):
+        """Run a fetch the drag asked for but was too large to do in it.
+
+        Called once the gesture has ended, so the progress dialog and its
+        Cancel button behave normally. Returns whether there was one, which
+        tells the view this drag ended in preparation rather than a drop.
+        """
+        names = getattr(self, '_pending_fetch', None)
+        self._pending_fetch = None
+        if not names or not run or getattr(self, '_closing', False):
+            return False
+        QTimer.singleShot(0, lambda: (
+            None if getattr(self, '_closing', False)
+            else self.prepare_for_dragging(names, after_drag=True)))
+        return True
 
     def drag_out_payload(self):
         """Put the selection on disk so the drag can also be dropped on the PC.

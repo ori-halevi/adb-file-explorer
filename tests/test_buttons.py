@@ -836,19 +836,38 @@ check("nothing is fetched while the drag is still moving",
 check("so a 900 MB video can be dragged at all",
       isinstance(carried.get('mime'), DeviceFiles))
 
-# this is what the receiver does when the drop lands
+# The receiver reads the data while the drag is still in the user's hand,
+# so 900 MB must not be pulled here: that is what froze the machine. It is
+# left for the moment the gesture ends instead.
 mime = carried['mime']
 urls = mime.urls()
-check("the files arrive when the receiver reads them",
+check("a huge selection is not pulled inside the gesture",
+      handler.calls == [], str(handler.calls))
+check("so nothing is handed over yet", urls == [] and mime.fetched is False,
+      str([u.toLocalFile() for u in urls]))
+check("and the fetch is queued for when the drag is over",
+      panel.take_pending_fetch() is True)
+check("which only happens once", panel.take_pending_fetch() is False)
+
+# A selection small enough to fetch in the moment still just works.
+handler.calls.clear()
+small = 2 * 1024 * 1024
+panel._items_by_name["clip.mp4"] = dict(panel._items_by_name["huge.mp4"],
+                                        name="clip.mp4", size=small,
+                                        path="/sdcard/Pictures/clip.mp4")
+light = DeviceFiles(panel, ["clip.mp4"], panel.fetch_for_drag)
+urls = light.urls()
+check("a small selection is fetched on the spot",
       [u.toLocalFile().replace('/', os.sep) for u in urls]
-      == [os.path.join(scratch, "huge.mp4")],
+      == [os.path.join(scratch, "clip.mp4")],
       str([u.toLocalFile() for u in urls]))
 check("which is when the fetch ran", bool(handler.calls), str(handler.calls))
-check("and the drag knows it handed something over", mime.fetched is True)
+check("and the drag knows it handed something over", light.fetched is True)
+check("with nothing left queued", panel.take_pending_fetch() is False)
 
 handler.calls.clear()
-check("reading again does not fetch again", bool(mime.urls()) and handler.calls == [],
-      str(handler.calls))
+check("reading again does not fetch again",
+      bool(light.urls()) and handler.calls == [], str(handler.calls))
 
 # an internal drop must never pull anything
 handler.calls.clear()

@@ -21,7 +21,9 @@ sys.path.insert(0, ROOT)
 os.chdir(ROOT)
 
 from PyQt6.QtCore import QMimeData, QPoint, QPointF, Qt, QUrl
-from PyQt6.QtGui import QDragMoveEvent, QDropEvent, QStandardItem, QStandardItemModel
+from PyQt6.QtCore import QEvent
+from PyQt6.QtGui import (QDragMoveEvent, QDropEvent, QMouseEvent,
+                         QStandardItem, QStandardItemModel)
 from PyQt6.QtWidgets import QApplication, QMenu
 
 from ui.views import ADB_MIME, ADB_RIGHT_MIME, DropTreeView, FileListView, ICONS_M
@@ -356,6 +358,31 @@ ALIVE.append(plain)
 check("a left-drag's data has no asking marker", not plain.hasFormat(ADB_RIGHT_MIME))
 asking = adb_mime(MINE, ["/sdcard/a.jpg"], right=True)
 check("a right-drag's data does", asking.hasFormat(ADB_RIGHT_MIME))
+
+print("\n=== 10. a gesture leaves nothing painted behind it ===")
+# The sweep rectangle is drawn by the view that handled the press, and it
+# is only erased by the matching release. A drag that swallows the release
+# used to leave the rectangle on screen for the rest of the session.
+from PyQt6.QtWidgets import QAbstractItemView
+
+for label, view in (("tree", DropTreeView(None, panel)), ("list", FileListView(None, panel))):
+    model = QStandardItemModel()
+    for name in ("a.jpg", "b.jpg", "c.jpg"):
+        model.appendRow([QStandardItem(name)])
+    view.setModel(model)
+    view.resize(400, 300)
+    painted = []
+    view.viewport().update = lambda *a, **k: painted.append(True)
+
+    view._drag_took_over = True        # as it is when a drag ate the release
+    view.setState(QAbstractItemView.State.DragSelectingState)
+    view.mouseReleaseEvent(
+        QMouseEvent(QEvent.Type.MouseButtonRelease, QPointF(10, 10),
+                    Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton,
+                    Qt.KeyboardModifier.NoModifier))
+    check(f"{label}: a swallowed release still ends the sweep",
+          view.state() == QAbstractItemView.State.NoState, str(view.state()))
+    check(f"{label}: and repaints, so the rectangle goes", bool(painted))
 
 print(f"\n{'=' * 60}\nPASSED {len(PASS)}  FAILED {len(FAIL)}")
 if FAIL:

@@ -118,7 +118,8 @@ class DeviceFiles(QMimeData):
                     self._urls.append(QUrl.fromLocalFile(path))
             except Exception:
                 self._urls = []
-            self.fetched = True
+            # Only count as handed over if something actually went out.
+            self.fetched = bool(self._urls)
         return self._urls
 
 
@@ -396,9 +397,14 @@ class DropMixin:
             # cursor now, which is not where the drag began.
             self._drag_took_over = False
             event.accept()
-            return
+        else:
+            super().mouseReleaseEvent(event)
 
-        super().mouseReleaseEvent(event)
+        # Whichever way the gesture ended, nothing of it should still be
+        # drawn: a selection rectangle left on screen outlives its gesture
+        # when the release does not reach the view that painted it.
+        self.setState(QAbstractItemView.State.NoState)
+        self.viewport().update()
 
     def _begin_sweep(self):
         """Let the view select freely, without starting a drag part-way."""
@@ -439,7 +445,14 @@ class DropMixin:
         result = drag.exec(Qt.DropAction.CopyAction | Qt.DropAction.MoveAction,
                            default)
 
-        if md.fetched and drag.target() is None:
+        # A drop inside the app reads the device format, so anything the
+        # system asked for on the way is not wanted.
+        landed_here = drag.target() is not None
+        if self.main_window.take_pending_fetch(run=not landed_here):
+            # There was too much to fetch inside the gesture, so it is being
+            # fetched now instead; the drag can be repeated once it is ready.
+            pass
+        elif md.fetched and drag.target() is None:
             # The receiver took the files. A move means it has deleted its
             # copy, so only the originals are left to remove.
             if result == Qt.DropAction.MoveAction:

@@ -6,7 +6,7 @@ changes what the panel can do with them.
 """
 
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QApplication, QListView, QMessageBox, QStyle,
+    QAbstractItemView, QApplication, QListView, QMenu, QMessageBox, QStyle,
     QStyledItemDelegate, QStyleOptionViewItem, QTreeView,
 )
 from PyQt6.QtCore import QMimeData, QSize, Qt, QUrl
@@ -14,6 +14,8 @@ from PyQt6.QtGui import (QColor, QDrag, QFontMetrics, QGuiApplication, QIcon,
                          QPainter, QPixmap)
 
 ADB_MIME = "application/x-adb-paths"
+# Marks a drag started with the right button, which asks on release.
+ADB_RIGHT_MIME = "application/x-adb-right-drag"
 
 # key, label, keyboard number, icon pixels
 DETAILS = 'details'
@@ -94,19 +96,67 @@ class DropMixin:
             return self.main_window.adb_handler.device_serial or ""
         return ""
 
+    # ----------------------------------------------------------- actions
+
+    def _dragged_serial(self, mime):
+        raw = bytes(mime.data(ADB_MIME)).decode("utf-8", errors="replace")
+        lines = [l.strip() for l in raw.split("\n") if l.strip()]
+        return lines[0] if lines else ""
+
+    def default_action_for(self, source_serial):
+        """What a plain drag means, following the rule Windows uses.
+
+        Within one storage a drag moves, and between two different storages
+        it copies. A phone and the PC, or two phones, are different storages.
+        """
+        mine = self._get_device_serial()
+        if source_serial and mine and source_serial == mine:
+            return Qt.DropAction.MoveAction
+        return Qt.DropAction.CopyAction
+
+    @staticmethod
+    def action_for_modifiers(modifiers, default):
+        """Ctrl copies and Shift moves, whatever the default would be."""
+        if modifiers & Qt.KeyboardModifier.ControlModifier:
+            return Qt.DropAction.CopyAction
+        if modifiers & Qt.KeyboardModifier.ShiftModifier:
+            return Qt.DropAction.MoveAction
+        return default
+
+    def _intended_action(self, event):
+        md = event.mimeData()
+        if md.hasFormat(ADB_MIME):
+            default = self.default_action_for(self._dragged_serial(md))
+            return self.action_for_modifiers(event.modifiers(), default)
+        # Files arriving from the PC are always copied: a move would have
+        # Windows delete the user's own files once the upload finished.
+        return Qt.DropAction.CopyAction
+
+    # --------------------------------------------------------------- accepting
+
     def _acceptable(self, event):
         md = event.mimeData()
         return (md.hasUrls() and not event.source()) or md.hasFormat(ADB_MIME)
 
+    def _accept(self, event):
+        """Accept with the action we intend, which is what draws the cursor.
+
+        Qt turns the accepted action into the platform's own drag cursor, so
+        a copy shows the plus badge and a move does not.
+        """
+        action = self._intended_action(event)
+        event.setDropAction(action)
+        event.accept()
+
     def dragEnterEvent(self, event):
         if self._acceptable(event):
-            event.acceptProposedAction()
+            self._accept(event)
             return
         event.ignore()
 
     def dragMoveEvent(self, event):
         if self._acceptable(event):
-            event.acceptProposedAction()
+            self._accept(event)
             return
         event.ignore()
 
@@ -114,10 +164,11 @@ class DropMixin:
         md = event.mimeData()
 
         if md.hasUrls() and not event.source():
+            event.setDropAction(Qt.DropAction.CopyAction)
             # Dropping onto a folder row puts the files in that folder, as it
             # would in a file manager.
             self.main_window.handle_drop_event(event, self._get_drop_destination(event))
-            event.acceptProposedAction()
+            event.accept()
             return
 
         if md.hasFormat(ADB_MIME):
@@ -129,45 +180,47 @@ class DropMixin:
 
             src_serial, paths = lines[0], lines[1:]
             dest = self._get_drop_destination(event)
-            # The event carries the modifiers held at drop time; a global
-            # snapshot can be stale and would turn a Ctrl-copy into a move.
-            modifiers = event.modifiers()
-            my_serial = self._get_device_serial()
+            action = self._intended_action(event)
 
-            if src_serial != my_serial and my_serial:
-                # Across devices the default is a copy; Shift turns it into a move.
-                move = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+            if md.hasFormat(ADB_RIGHT_MIME):
+                # A drag with the right button asks on release, as Windows does.
+                action = self._ask_drop_action(event, action)
+                if action is None:
+                    event.ignore()
+                    return
+
+            move = action == Qt.DropAction.MoveAction
+            if src_serial != self._get_device_serial() and self._get_device_serial():
                 self._handle_cross_device_drop(src_serial, paths, dest, move)
             else:
-                # Within one device the default is a move, as in a file manager;
-                # Ctrl turns it into a copy.
-                move = not bool(modifiers & Qt.KeyboardModifier.ControlModifier)
                 self.main_window.move_or_copy_items(paths, dest, move=move)
 
-            event.acceptProposedAction()
+            event.setDropAction(action)
+            event.accept()
             return
 
         event.ignore()
 
-    def _drag_pixmap(self, indexes):
-        """What the cursor carries: the first icon, with a count beside it."""
-        size = max(32, min(self.iconSize().width(), 64))
-        pixmap = QPixmap(size + 54, size + 8)
-        pixmap.fill(Qt.GlobalColor.transparent)
+    def _ask_drop_action(self, event, default):
+        """The menu Windows shows when a drag is made with the right button."""
+        menu = QMenu(self)
+        copy_action = menu.addAction("Copy here")
+        move_action = menu.addAction("Move here")
+        menu.addSeparator()
+        menu.addAction("Cancel")
 
-        painter = QPainter(pixmap)
-        icon = self.model().data(indexes[0].siblingAtColumn(0),
-                                 Qt.ItemDataRole.DecorationRole)
-        if icon is not None and not icon.isNull():
-            painter.drawPixmap(4, 4, icon.pixmap(size, size))
-        if len(indexes) > 1:
-            badge = f"{len(indexes)}"
-            painter.setPen(self.palette().highlightedText().color())
-            painter.fillRect(size + 8, size // 2 - 10, 40, 20,
-                             self.palette().highlight())
-            painter.drawText(size + 14, size // 2 + 5, badge)
-        painter.end()
-        return pixmap
+        bold = copy_action if default == Qt.DropAction.CopyAction else move_action
+        font = bold.font()
+        font.setBold(True)
+        bold.setFont(font)
+        menu.setDefaultAction(bold)
+
+        chosen = menu.exec(self.viewport().mapToGlobal(event.position().toPoint()))
+        if chosen is copy_action:
+            return Qt.DropAction.CopyAction
+        if chosen is move_action:
+            return Qt.DropAction.MoveAction
+        return None
 
     def _get_drop_destination(self, event):
         dest = self.main_window.current_path
@@ -202,6 +255,12 @@ class DropMixin:
         QMessageBox.warning(self, "Cross-Device Drop",
                             "Cross-device streaming not available from this view.")
 
+    def _source_panel(self, serial):
+        for panel in getattr(self.window(), 'device_panels', []):
+            if panel.device_serial == serial:
+                return panel
+        return None
+
     def selected_rows(self):
         """Selected rows, however the view happens to report them."""
         model = self.selectionModel()
@@ -215,13 +274,35 @@ class DropMixin:
             seen.setdefault(index.row(), index.siblingAtColumn(0))
         return [seen[row] for row in sorted(seen)]
 
-    def _source_panel(self, serial):
-        for panel in getattr(self.window(), 'device_panels', []):
-            if panel.device_serial == serial:
-                return panel
-        return None
+    # ---------------------------------------------------------------- dragging
 
-    def startDrag(self, supportedActions):
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.RightButton:
+            index = self.indexAt(event.position().toPoint())
+            if index.isValid():
+                # Remember where a right-drag might begin. The context menu
+                # still opens if the button is released without moving.
+                self._right_press = event.position().toPoint()
+                return
+        self._right_press = None
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        start = getattr(self, '_right_press', None)
+        if start is not None and (event.buttons() & Qt.MouseButton.RightButton):
+            if (event.position().toPoint() - start).manhattanLength() >= \
+                    QApplication.startDragDistance():
+                self._right_press = None
+                self.startDrag(Qt.DropAction.CopyAction | Qt.DropAction.MoveAction,
+                               right_button=True)
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._right_press = None
+        super().mouseReleaseEvent(event)
+
+    def startDrag(self, supportedActions, right_button=False):
         indexes = self.selected_rows()
         if not indexes:
             return
@@ -238,6 +319,8 @@ class DropMixin:
 
         md = QMimeData()
         md.setData(ADB_MIME, "\n".join([serial] + paths).encode("utf-8"))
+        if right_button:
+            md.setData(ADB_RIGHT_MIME, b"1")
 
         # Real file URLs are what let a selection be dropped on the desktop or
         # in Explorer, and they only exist once the files have been fetched.
@@ -251,9 +334,35 @@ class DropMixin:
         drag = QDrag(self)
         drag.setMimeData(md)
         drag.setPixmap(self._drag_pixmap(indexes))
-        # Always a copy as far as the drag protocol is concerned; whether an
-        # internal drop moves or copies is decided from the modifier keys.
-        drag.exec(Qt.DropAction.CopyAction)
+
+        default = self.default_action_for(serial)
+        result = drag.exec(Qt.DropAction.CopyAction | Qt.DropAction.MoveAction,
+                           default)
+
+        # Dropped outside this application: whoever took the files has copied
+        # them already, so a move only has the originals left to remove.
+        if drag.target() is None and result == Qt.DropAction.MoveAction and local_paths:
+            self.main_window.confirm_move_to_pc(paths)
+
+    def _drag_pixmap(self, indexes):
+        """What the cursor carries: the first icon, with a count beside it."""
+        size = max(32, min(self.iconSize().width(), 64))
+        pixmap = QPixmap(size + 54, size + 8)
+        pixmap.fill(Qt.GlobalColor.transparent)
+
+        painter = QPainter(pixmap)
+        icon = self.model().data(indexes[0].siblingAtColumn(0),
+                                 Qt.ItemDataRole.DecorationRole)
+        if icon is not None and not icon.isNull():
+            painter.drawPixmap(4, 4, icon.pixmap(size, size))
+        if len(indexes) > 1:
+            badge = f"{len(indexes)}"
+            painter.setPen(self.palette().highlightedText().color())
+            painter.fillRect(size + 8, size // 2 - 10, 40, 20,
+                             self.palette().highlight())
+            painter.drawText(size + 14, size // 2 + 5, badge)
+        painter.end()
+        return pixmap
 
 
 class DropTreeView(DropMixin, QTreeView):

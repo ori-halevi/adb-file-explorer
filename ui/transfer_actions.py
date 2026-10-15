@@ -743,6 +743,43 @@ class TransferActionsMixin:
                        f"or anywhere on the PC")
         return local
 
+    def confirm_move_to_pc(self, remote_paths):
+        """A drag out that the receiver treated as a move.
+
+        What it took were copies, so the only thing a move leaves to do is
+        remove the originals - destructive enough to ask about first.
+        """
+        names = [p.rstrip('/').split('/')[-1] for p in remote_paths]
+        if not names:
+            return
+        listed = ", ".join(names[:3]) + ("..." if len(names) > 3 else "")
+        if not self._confirm(
+                "Move to the PC",
+                f"{len(names)} item(s) were copied to the PC.\n\n{listed}\n\n"
+                f"Delete them from {self.device_name} to complete the move?"):
+            self._note("Copied to the PC; nothing was deleted")
+            return
+
+        handler = self.adb_handler
+        ctx = TransferContext([handler])
+
+        def run():
+            outcome = TransferOutcome(len(remote_paths))
+            for path in remote_paths:
+                if ctx.cancelled:
+                    outcome.cancelled = True
+                    break
+                name = path.rstrip('/').split('/')[-1]
+                ctx.say(f"Removing {name}")
+                ok = handler.delete_item(path, is_dir=self.is_dir_for_path(path))
+                outcome.record(name, ok, handler.last_error)
+            return outcome
+
+        self._run_modal(f"Removing {len(remote_paths)} item(s)", run,
+                        on_done=lambda o: self._report_outcome(o, "Moved to the PC -"),
+                        on_error=lambda: self._report_error("Could not remove the originals"),
+                        ctx=ctx)
+
     def hint_drag_to_pc(self):
         """Kept for callers that only want the tip, without fetching anything."""
         if getattr(self, '_drag_hint_shown', False):

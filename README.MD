@@ -20,6 +20,32 @@ A graphical file manager for Android devices connected via ADB (Android Debug Br
 - **App Installer** - Install APK or XAPK files
 - **Wireless ADB** - Connect to devices over network (no USB required)
 
+## Dragging
+Drag-and-drop follows the rules Windows Explorer uses, so the same habits
+work here:
+
+| Gesture | What happens |
+| --- | --- |
+| Drag within one device | **Move** - the same storage, so nothing is duplicated |
+| Drag to another device, or to the PC | **Copy** - a different storage |
+| `Ctrl` + drag | Copy, wherever it is dropped |
+| `Shift` + drag | Move, wherever it is dropped |
+| Drag with the **right button** | A menu on release: Copy here, Move here, Cancel - the action that would have happened is in bold |
+
+The cursor shows which it will be while you drag, because the panel accepts
+the drag with that action and the system draws the matching cursor.
+
+Dragging out to Explorer, the desktop, or anything else that takes files
+copies them there. A selection under 24 MB is fetched as the drag starts, so
+it can be dropped anywhere; a larger one still drags between panels, and the
+status bar points at "To PC" instead. If the place you drop into asks for a
+move rather than a copy, the files are copied first and the panel then asks
+before deleting the originals from the phone.
+
+Files dragged **in** from the PC are always copied, never moved: a move would
+have Windows delete your own files once the upload finished, which is not
+something a transfer tool should do quietly.
+
 ## Selecting and the right-click menu
 Selection behaves as it does in a file manager, in every view: click,
 `Ctrl`+click to add, `Shift`+click for a range, a rubber band dragged over
@@ -155,7 +181,8 @@ themselves:
 python tests/test_transfers.py   # copy, move, conflicts, cancel, failures
 python tests/test_views.py       # view modes, thumbnails, cache, rotation
 python tests/test_theme.py       # readable text in both themes (no device)
-python tests/test_buttons.py     # the toolbar buttons do what they say (no device)
+python tests/test_buttons.py     # buttons, selection, menus, sorting (no device)
+python tests/test_dragdrop.py    # the Explorer drag rules (no device)
 ```
 
 `test_transfers.py` covers the destructive paths deliberately - replace,

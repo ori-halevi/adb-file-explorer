@@ -17,7 +17,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 os.chdir(ROOT)
 
-from PyQt6.QtWidgets import (QApplication, QFileDialog, QMenu, QPushButton,
+from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog,
+                             QMenu, QPushButton,
                              QToolButton)
 from PyQt6.QtGui import QStandardItem
 from PyQt6.QtCore import QItemSelectionModel, QPoint, Qt
@@ -106,6 +107,17 @@ panel.tree_view.selectionModel().select(
     panel.tree_model.index(0, 0),
     QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows)
 app.processEvents()
+
+def select_by_name(*wanted):
+    selection = panel.tree_view.selectionModel()
+    selection.clearSelection()
+    for row in range(panel.tree_model.rowCount()):
+        if panel.tree_model.data(panel.tree_model.index(row, 0)) in wanted:
+            selection.select(panel.tree_model.index(row, 0),
+                             QItemSelectionModel.SelectionFlag.Select
+                             | QItemSelectionModel.SelectionFlag.Rows)
+    app.processEvents()
+
 
 print("\n=== 1. the panel offers the transfer buttons ===")
 buttons = {b.text(): b for b in panel.findChildren(QPushButton)}
@@ -429,6 +441,93 @@ for sort_key, expected in (
              for row in range(panel.tree_model.rowCount())]
     check(f"sorting by {sort_key} keeps folders above files",
           order == expected, str(order))
+
+print("\n=== 14. keeping the place in a long folder ===")
+panel.refresh_files = DevicePanel.refresh_files.__get__(panel)
+panel.tree_model.clear()
+panel.tree_model.setHorizontalHeaderLabels(
+    ['Name', 'Type', 'Size', 'Permissions', 'Modified'])
+from handler import FileItem
+
+many = [FileItem(f"row{i:03d}.txt", f"/sdcard/Pictures/row{i:03d}.txt", False,
+                 100 + i, "-rw-", "2026-01-01 10:00") for i in range(300)]
+handler.list_directory = lambda path, use_root=False: list(many)
+panel.set_view_mode(views.DETAILS)
+panel.current_path = "/sdcard/Pictures"
+panel.refresh_files()
+for _ in range(120):
+    app.processEvents()
+    if not panel._loading:
+        break
+for _ in range(20):
+    app.processEvents()
+
+view = panel.tree_view
+view.resize(900, 400)
+app.processEvents()
+view.scrollTo(panel.tree_model.index(200, 0),
+              QAbstractItemView.ScrollHint.PositionAtTop)
+app.processEvents()
+before_top = panel.tree_model.data(view.indexAt(view.viewport().rect().topLeft()))
+before_scroll = view.verticalScrollBar().value()
+select_by_name("row205.txt")
+check("the view is scrolled down the folder", before_scroll > 0, str(before_scroll))
+
+panel.refresh_files()
+for _ in range(120):
+    app.processEvents()
+    if not panel._loading:
+        break
+for _ in range(40):
+    app.processEvents()
+
+after_top = panel.tree_model.data(view.indexAt(view.viewport().rect().topLeft()))
+check("refreshing the same folder keeps the place",
+      after_top == before_top, f"{before_top} -> {after_top}")
+check("and keeps the selection", panel._selected_names() == ["row205.txt"],
+      str(panel._selected_names()))
+
+# moving to another folder must start at the top again
+panel.current_path = "/sdcard/Other"
+panel.refresh_files()
+for _ in range(120):
+    app.processEvents()
+    if not panel._loading:
+        break
+for _ in range(40):
+    app.processEvents()
+check("a different folder starts at the top",
+      panel.tree_view.verticalScrollBar().value() == 0,
+      str(panel.tree_view.verticalScrollBar().value()))
+
+print("\n=== 15. a move only deletes once the copy is confirmed ===")
+sizes = {"/sdcard/a.txt": 100, "/sdcard/dest/a.txt": 100,
+         "/sdcard/b.txt": 100, "/sdcard/dest/b.txt": 7}
+handler.sizes_of = lambda paths: {p: sizes.get(p) for p in paths}
+handler.checksums_of = lambda paths, timeout=600: {p: "same" for p in paths}
+
+confirmed = panel.verify_arrived([("/sdcard/a.txt", "/sdcard/dest/a.txt")])
+check("a copy of the same size is confirmed", confirmed == ["/sdcard/a.txt"],
+      str(confirmed))
+
+confirmed = panel.verify_arrived([("/sdcard/b.txt", "/sdcard/dest/b.txt")])
+check("a truncated copy is not", confirmed == [], str(confirmed))
+
+confirmed = panel.verify_arrived([("/sdcard/a.txt", "/sdcard/missing.txt")])
+check("a copy that is not there is not", confirmed == [], str(confirmed))
+
+settings = panel._settings()
+settings.setValue("verify_checksum", True)
+handler.checksums_of = lambda paths, timeout=600: {
+    p: ("one" if p.endswith("a.txt") and "dest" not in p else "two") for p in paths}
+confirmed = panel.verify_arrived([("/sdcard/a.txt", "/sdcard/dest/a.txt")])
+check("with checking on, different contents are rejected", confirmed == [],
+      str(confirmed))
+handler.checksums_of = lambda paths, timeout=600: {p: "same" for p in paths}
+confirmed = panel.verify_arrived([("/sdcard/a.txt", "/sdcard/dest/a.txt")])
+check("and matching contents are accepted", confirmed == ["/sdcard/a.txt"],
+      str(confirmed))
+settings.setValue("verify_checksum", False)
 
 print(f"\n{'=' * 60}\nPASSED {len(PASS)}  FAILED {len(FAIL)}")
 if FAIL:

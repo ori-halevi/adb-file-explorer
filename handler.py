@@ -1054,6 +1054,49 @@ class ADBHandler:
             line_callback=line_callback,
         )
 
+    def sizes_of(self, paths: List[str]) -> Dict[str, Optional[int]]:
+        """Size of each remote path, in one call. None where it is unknown.
+
+        Used to check that a copy really arrived before the original is
+        removed, which is the one thing a move must not get wrong.
+        """
+        if not paths:
+            return {}
+        result: Dict[str, Optional[int]] = {p: None for p in paths}
+        try:
+            for batch in self._chunk_by_length(paths):
+                quoted = ' '.join(shell_quote(p) for p in batch)
+                reply = self._shell(f'stat -c "%s %n" {quoted}', timeout=60)
+                for line in (reply.stdout or "").splitlines():
+                    size, _, name = line.strip().partition(' ')
+                    if size.isdigit() and name in result:
+                        result[name] = int(size)
+        except Exception as e:
+            self.logger.warning(f"Could not measure {len(paths)} path(s): {e}")
+        return result
+
+    def checksums_of(self, paths: List[str], timeout: int = 600) -> Dict[str, Optional[str]]:
+        """MD5 of each remote path, in as few calls as fit on a command line.
+
+        Only used when the user asks for it: the device reads every byte, at
+        roughly 45 MB/s, so a long video costs real time.
+        """
+        if not paths:
+            return {}
+        result: Dict[str, Optional[str]] = {p: None for p in paths}
+        try:
+            for batch in self._chunk_by_length(paths):
+                quoted = ' '.join(shell_quote(p) for p in batch)
+                reply = self._shell(f'md5sum {quoted}', timeout=timeout)
+                for line in (reply.stdout or "").splitlines():
+                    digest, _, name = line.strip().partition(' ')
+                    name = name.strip()
+                    if len(digest) == 32 and name in result:
+                        result[name] = digest
+        except Exception as e:
+            self.logger.warning(f"Could not checksum {len(paths)} path(s): {e}")
+        return result
+
     def disk_usage_many(self, paths: List[str], timeout: int = 20) -> Optional[int]:
         """Total size of several remote paths, or None if it cannot be measured.
 

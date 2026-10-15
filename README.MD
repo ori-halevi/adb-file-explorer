@@ -177,6 +177,24 @@ Long transfers show the current file and can be cancelled, which stops the
 adb transfer itself. If only some items make it, the status line says how many
 failed and why, rather than reporting success.
 
+### What a move checks before it deletes
+Within one device a move is a rename, so nothing is copied and there is
+nothing to check. Across storages - between two devices, or to the PC - a
+move is a copy followed by a delete, and the link can drop in between. The
+copy's size is therefore always compared against the original before the
+original is removed, which costs one call and catches a truncated transfer;
+if they differ, the original is kept and the status line says so.
+
+The View menu can also turn on "Check contents before a move deletes", which
+compares an MD5 of both sides. It is off by default because the device has
+to read every byte, at roughly 45 MB/s - about twenty seconds each way for a
+one-gigabyte video.
+
+Refreshing a folder - after a transfer, or with F5 - keeps the place you had
+scrolled to and what you had selected. It follows the row that was at the
+top by name rather than by pixels, so it still lands correctly when the
+folder's contents have changed.
+
 ### Keyboard shortcuts
 | Shortcut | Action |
 | --- | --- |

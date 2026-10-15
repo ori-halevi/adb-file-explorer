@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QMessageBox, QLineEdit, QMenu, QFileDialog, QInputDialog,
     QLabel, QCheckBox, QFileIconProvider, QProgressBar, QDialog, QTreeView,
-    QStackedWidget, QToolButton,
+    QStackedWidget, QToolButton, QAbstractItemView,
 )
 from PyQt6.QtGui import (QStandardItemModel, QStandardItem, QAction, QKeySequence,
                          QShortcut, QIcon)
@@ -81,6 +81,8 @@ class DevicePanel(TransferActionsMixin, QWidget):
         self._host_clipboard_time = 0.0
         self._last_download_dir = None
         self._post_refresh_note = None
+        self._pending_restore = None
+        self._loaded_path = None
         self._drag_hint_shown = False
         self.sort_key = 'name'
         self.sort_desc = False
@@ -361,6 +363,16 @@ class DevicePanel(TransferActionsMixin, QWidget):
             "Also fetch pictures for the small views, which costs a read per file")
         self._small_thumb_action.toggled.connect(self._set_small_thumbnails)
 
+        menu.addSeparator()
+        self._verify_action = menu.addAction("Check contents before a move deletes")
+        self._verify_action.setCheckable(True)
+        self._verify_action.setChecked(self._checksum_wanted())
+        self._verify_action.setToolTip(
+            "A move always checks the copy's size first. This compares the "
+            "contents as well, which means reading every byte on both sides.")
+        self._verify_action.toggled.connect(
+            lambda on: self._settings().setValue("verify_checksum", bool(on)))
+
         return menu
 
     def _small_thumbnails_wanted(self):
@@ -606,6 +618,11 @@ class DevicePanel(TransferActionsMixin, QWidget):
             self._refresh_pending = True
             return
 
+        # Coming back to the same folder should not throw away the place
+        # the user had scrolled to, which matters in a folder of thousands.
+        self._pending_restore = (self._capture_place()
+                                 if self.current_path == self._loaded_path else None)
+
         self._loading = True
         self.status_label.setText(f"Loading {self.current_path}...")
         self.tree_model.clear()
@@ -622,6 +639,12 @@ class DevicePanel(TransferActionsMixin, QWidget):
                 self.all_files = files
                 self.apply_search_filter()
                 # Keep the result of the last operation visible next to the count.
+                self._loaded_path = self.current_path
+                place, self._pending_restore = self._pending_restore, None
+                if place:
+                    # After the rows are laid out, which an icon view needs.
+                    QTimer.singleShot(0, lambda p=place: self._restore_place(p))
+
                 note = self._post_refresh_note
                 self._post_refresh_note = None
                 count = f"{len(self.all_files)} items"
@@ -645,6 +668,46 @@ class DevicePanel(TransferActionsMixin, QWidget):
         task.finished_signal.connect(on_files)
         task.finished_signal.connect(clear_refresh_task)
         task.start()
+
+    def _capture_place(self):
+        """Where the user is in this folder: the top row, selection and all."""
+        view = self.tree_view
+        model = self.tree_model
+        top = view.indexAt(view.viewport().rect().topLeft())
+        current = view.currentIndex()
+        return {
+            'top': model.data(top.siblingAtColumn(0)) if top.isValid() else None,
+            'scroll': view.verticalScrollBar().value(),
+            'selected': set(self._selected_names()),
+            'current': model.data(current.siblingAtColumn(0)) if current.isValid() else None,
+        }
+
+    def _restore_place(self, place):
+        """Put the view back where it was, as far as the folder still allows."""
+        if not place or self._closing:
+            return
+        view = self.tree_view
+        model = self.tree_model
+        rows = {model.data(model.index(row, 0)): row for row in range(model.rowCount())}
+
+        selection = view.selectionModel()
+        selection.clearSelection()
+        flags = (QItemSelectionModel.SelectionFlag.Select
+                 | QItemSelectionModel.SelectionFlag.Rows)
+        for name in place['selected']:
+            if name in rows:
+                selection.select(model.index(rows[name], 0), flags)
+        if place['current'] in rows:
+            selection.setCurrentIndex(model.index(rows[place['current']], 0),
+                                      QItemSelectionModel.SelectionFlag.NoUpdate)
+
+        top = place.get('top')
+        if top in rows:
+            view.scrollTo(model.index(rows[top], 0),
+                          QAbstractItemView.ScrollHint.PositionAtTop)
+        else:
+            bar = view.verticalScrollBar()
+            bar.setValue(min(place.get('scroll', 0), bar.maximum()))
 
     def prepare_for_close(self):
         """Keep the panel alive until its workers have stopped.

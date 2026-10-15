@@ -152,6 +152,42 @@ class TransferActionsMixin:
         self._note("No ADB device")
         return False
 
+    def verify_arrived(self, pairs, target_panel=None):
+        """Check a copy really arrived before its original is removed.
+
+        A move across storages is a copy followed by a delete, so the delete
+        is only safe once the copy has been confirmed. Sizes are compared
+        always, which costs one call and catches a truncated transfer; the
+        contents are compared as well when the panel is set to.
+
+        `pairs` is a list of (source path, destination path). Returns the
+        sources that were confirmed.
+        """
+        if not pairs:
+            return []
+        target = (target_panel or self).adb_handler
+
+        source_sizes = self.adb_handler.sizes_of([s for s, _ in pairs])
+        dest_sizes = target.sizes_of([d for _, d in pairs])
+        confirmed = [
+            (source, dest) for source, dest in pairs
+            if source_sizes.get(source) is not None
+            and source_sizes.get(source) == dest_sizes.get(dest)
+        ]
+
+        if confirmed and self._checksum_wanted():
+            source_sums = self.adb_handler.checksums_of([s for s, _ in confirmed])
+            dest_sums = target.checksums_of([d for _, d in confirmed])
+            confirmed = [
+                (source, dest) for source, dest in confirmed
+                if source_sums.get(source) and source_sums.get(source) == dest_sums.get(dest)
+            ]
+
+        return [source for source, _ in confirmed]
+
+    def _checksum_wanted(self):
+        return self._settings().value("verify_checksum", False, type=bool)
+
     @staticmethod
     def _backup_path(path):
         return f"{path.rstrip('/')}.adbx-replacing-{os.getpid()}"
@@ -779,15 +815,29 @@ class TransferActionsMixin:
 
         handler = self.adb_handler
         ctx = TransferContext([handler])
+        fetched = transfer.temp_transfer_dir(self.device_serial)
 
         def run():
             outcome = TransferOutcome(len(remote_paths))
+            sizes = handler.sizes_of([p for p in remote_paths
+                                      if not self.is_dir_for_path(p)])
             for path in remote_paths:
                 if ctx.cancelled:
                     outcome.cancelled = True
                     break
                 name = path.rstrip('/').split('/')[-1]
                 ctx.say(f"Removing {name}")
+
+                # The copy the other application took came from here, so this
+                # is what has to match before the original goes.
+                local = os.path.join(fetched, name)
+                if not self.is_dir_for_path(path):
+                    if not os.path.exists(local) or os.path.getsize(local) != sizes.get(path):
+                        outcome.record(name, False,
+                                       "the copy on the PC does not match, "
+                                       "so the original was kept")
+                        continue
+
                 ok = handler.delete_item(path, is_dir=self.is_dir_for_path(path))
                 outcome.record(name, ok, handler.last_error)
             return outcome
@@ -867,11 +917,21 @@ class TransferActionsMixin:
                     error = None if ok else source_handler.last_error
 
                 if ok and move:
-                    # delete_item without missing_ok fails loudly if the
-                    # source could not actually be removed.
-                    ok = source_handler.delete_item(item.source['path'],
-                                                    is_dir=item.is_dir)
-                    error = None if ok else source_handler.last_error
+                    if item.is_dir:
+                        verified = True
+                    else:
+                        verified = bool(self.verify_arrived(
+                            [(item.source['path'], dest)], target_panel))
+                    if not verified:
+                        ok = False
+                        error = ("the copy on " + target_name +
+                                 " does not match, so the original was kept")
+                    else:
+                        # delete_item without missing_ok fails loudly if the
+                        # source could not actually be removed.
+                        ok = source_handler.delete_item(item.source['path'],
+                                                        is_dir=item.is_dir)
+                        error = None if ok else source_handler.last_error
 
                 outcome.record(item.name, ok, error)
                 if ctx.cancelled:

@@ -394,14 +394,16 @@ for label, view in (("tree", DropTreeView(None, panel)), ("list", FileListView(N
           str([i.row() for i in view.selectionModel().selectedRows()]))
     check(f"{label}: and without reading as a click", clicks == [], str(clicks))
 
-print("\n=== 11. a drag too large to fetch remembers what it wanted ===")
-# The gesture says copy or move; only the folder it landed on is lost, so
-# the user should not have to press the same keys and drag a second time.
+print("\n=== 11. a drag too large to fetch is only deferred ===")
+# Preparing it is all that happens here. Finishing is the second drag,
+# which is a real Windows drag: Explorer does the copying, with its own
+# progress, and a move still ends in the usual question about the
+# originals - neither of which an in-app dialog can stand in for.
 from ui.transfer_actions import TransferActionsMixin
 
 
-class Intent(TransferActionsMixin):
-    """Just the parts of a panel the remembering touches."""
+class Deferred(TransferActionsMixin):
+    """Just the parts of a panel the deferral touches."""
 
     def __init__(self):
         self._notes = []
@@ -411,36 +413,18 @@ class Intent(TransferActionsMixin):
         self._notes.append(text)
 
 
-holder = Intent()
-import ui.transfer_actions as _ta
-real_mods = _ta.QGuiApplication.keyboardModifiers
-
-
-class Mods:
-    def __init__(self, value):
-        self.value = value
-
-    def __call__(self):
-        return self.value
-
-
-_ta.QGuiApplication.keyboardModifiers = staticmethod(
-    Mods(Qt.KeyboardModifier.ShiftModifier))
+holder = Deferred()
 holder._fetch_after_gesture(["a.jpg", "b.jpg"])
-check("Shift on a deferred drag is remembered as a move",
-      holder._drag_intent == 'move', str(holder._drag_intent))
-
-_ta.QGuiApplication.keyboardModifiers = staticmethod(
-    Mods(Qt.KeyboardModifier.NoModifier))
-holder._fetch_after_gesture(["a.jpg"])
-check("and a plain one as a copy", holder._drag_intent == 'copy',
-      str(holder._drag_intent))
-check("the names are kept for the fetch", holder._pending_fetch == ["a.jpg"],
-      str(holder._pending_fetch))
-check("a drop inside the app forgets both",
+check("the names are kept for the fetch",
+      holder._pending_fetch == ["a.jpg", "b.jpg"], str(holder._pending_fetch))
+check("and the user is told what is happening",
+      any("drag again" in note for note in holder._notes), str(holder._notes))
+check("a drop inside the app forgets it",
       holder.take_pending_fetch(run=False) is False
-      and holder._drag_intent is None and holder._pending_fetch is None)
-_ta.QGuiApplication.keyboardModifiers = real_mods
+      and holder._pending_fetch is None)
+holder._fetch_after_gesture(["a.jpg"])
+check("a drop outside runs it, once",
+      holder.take_pending_fetch() is True and holder.take_pending_fetch() is False)
 
 print(f"\n{'=' * 60}\nPASSED {len(PASS)}  FAILED {len(FAIL)}")
 if FAIL:
